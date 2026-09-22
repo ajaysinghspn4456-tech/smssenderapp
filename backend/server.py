@@ -663,8 +663,28 @@ async def dashboard(settings: dict = Depends(require_token)):
 
 
 # --------------------------------------------------------------------------- #
-# Export results
+# Sample template (public helper) + Export results
 # --------------------------------------------------------------------------- #
+@api_router.get("/sample-template")
+async def sample_template():
+    """Downloads a ready-to-use sample xlsx with the expected columns."""
+    df = pd.DataFrame([
+        {"Mobile Number": "9876543210", "Message": "Dear consumer, aapka bill due hai. Kripya samay par jama karein."},
+        {"Mobile Number": "9123456789", "Message": "Namaste, aapka electricity bill taiyar hai."},
+        {"Mobile Number": "9988776655", "Message": "Reminder: kripya apna pending bill jama karein. Dhanyavaad."},
+        {"Mobile Number": "+919000000001", "Message": "Aapka payment mil gaya hai. Shukriya!"},
+    ])
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="SMS")
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="sms_sample_template.xlsx"'},
+    )
+
+
 @api_router.get("/batches/{batch_id}/export")
 async def export_results(batch_id: str, token: str = ""):
     """Downloads an xlsx of results. Token passed as query param so a plain

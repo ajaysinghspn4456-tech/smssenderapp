@@ -1,10 +1,12 @@
 import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
+import * as Sharing from "expo-sharing";
 import { useQuery } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
 import { useState } from "react";
-import { ActivityIndicator, Image, Pressable, ScrollView, Text, View } from "react-native";
+import { ActivityIndicator, Image, Linking, Platform, Pressable, ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { FileArrowUp, CheckCircle, WarningCircle, Table } from "phosphor-react-native";
+import { FileArrowUp, CheckCircle, WarningCircle, Table, DownloadSimple } from "phosphor-react-native";
 
 import {
   ColumnsResult,
@@ -46,8 +48,28 @@ export default function UploadScreen() {
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [invalidView, setInvalidView] = useState(false);
 
-  async function pickFile() {
+  async function downloadSample() {
+    const url = `${process.env.EXPO_PUBLIC_BACKEND_URL}/api/sample-template`;
     try {
+      if (Platform.OS === "web") {
+        Linking.openURL(url);
+        return;
+      }
+      const target = `${FileSystem.cacheDirectory}sms_sample_template.xlsx`;
+      const dl = await FileSystem.downloadAsync(url, target);
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(dl.uri, {
+          mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        });
+      } else {
+        toast("Template saved", "success");
+      }
+    } catch (e: any) {
+      toast(e?.message || "Download failed", "error");
+    }
+  }
+
+  async function pickFile() {    try {
       const res = await DocumentPicker.getDocumentAsync({ type: "*/*", copyToCacheDirectory: true });
       if (res.canceled) return;
       const asset = res.assets[0];
@@ -144,6 +166,11 @@ export default function UploadScreen() {
           </View>
           <Text style={styles.dropTitle}>{file ? file.filename : "Select a file"}</Text>
           <Text style={styles.dropSub}>.xlsx · .xls · .csv</Text>
+        </Pressable>
+
+        <Pressable style={styles.sampleLink} onPress={downloadSample} testID="download-sample">
+          <DownloadSimple size={16} color={colors.brandPrimary} weight="bold" />
+          <Text style={styles.sampleText}>Sample template download karein</Text>
         </Pressable>
 
         {busy ? (
@@ -317,6 +344,8 @@ const useStyles = makeStyles((colors) => ({
   },
   dropTitle: { fontSize: 16, fontWeight: "700", color: colors.onSurface },
   dropSub: { fontSize: 13, color: colors.muted },
+  sampleLink: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: spacing.xs },
+  sampleText: { fontSize: 14, fontWeight: "700", color: colors.brandPrimary },
   loading: { flexDirection: "row", alignItems: "center", gap: spacing.sm, justifyContent: "center" },
   loadingText: { color: colors.muted },
   cardTitle: { fontSize: 16, fontWeight: "800", color: colors.onSurface, marginBottom: spacing.md },
