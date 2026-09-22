@@ -9,7 +9,8 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@expo/metro-runtime": "57.0.16",
@@ -38,7 +39,9 @@
     "expo-symbols": "57.0.3",
     "expo-system-ui": "57.0.4",
     "expo-web-browser": "57.0.3",
+    "patch-package": "8.0.1",
     "phosphor-react-native": "3.0.6",
+    "postinstall-postinstall": "2.1.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.3",

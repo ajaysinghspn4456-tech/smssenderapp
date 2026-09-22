@@ -1,0 +1,25 @@
+diff --git a/node_modules/expo-android-sms-sender/android/src/main/java/expo/modules/androidsmssender/ExpoAndroidSmsSenderModule.kt b/node_modules/expo-android-sms-sender/android/src/main/java/expo/modules/androidsmssender/ExpoAndroidSmsSenderModule.kt
+index b2ef9c0..91f2401 100644
+--- a/node_modules/expo-android-sms-sender/android/src/main/java/expo/modules/androidsmssender/ExpoAndroidSmsSenderModule.kt
++++ b/node_modules/expo-android-sms-sender/android/src/main/java/expo/modules/androidsmssender/ExpoAndroidSmsSenderModule.kt
+@@ -60,7 +60,19 @@ class ExpoAndroidSmsSenderModule : Module() {
+       val sentIntent = createSentPendingIntent(context, promise)
+       
+       try {
+-        smsManager.sendTextMessage(phoneNumber, null, message, sentIntent, null)
++        // Long messages (e.g. multi-part Hindi/Unicode SMS) must be divided and
++        // sent as a concatenated multipart message; sendTextMessage alone would
++        // truncate them. Short messages still use the single-part path.
++        val parts = smsManager.divideMessage(message)
++        if (parts.size > 1) {
++          val sentIntents = ArrayList<PendingIntent>()
++          for (i in parts.indices) {
++            sentIntents.add(sentIntent)
++          }
++          smsManager.sendMultipartTextMessage(phoneNumber, null, parts, sentIntents, null)
++        } else {
++          smsManager.sendTextMessage(phoneNumber, null, message, sentIntent, null)
++        }
+       } catch(e: IllegalArgumentException) {
+         promise.reject("INVALID_ARGUMENTS", "Invalid arguments provided", e)
+       } catch(e: UnsupportedOperationException) {

@@ -1,0 +1,45 @@
+{
+  "summary": "Iteration 3 regression after (1) patch-package Kotlin patch to expo-android-sms-sender adding divideMessage + sendMultipartTextMessage (native-only, unreachable on web), and (2) adding patch-package + postinstall to package.json. Runtime/backend regression is clean. Added /app/backend/tests/test_consumer_csv_regression.py (12 tests) driving the user's real /tmp/consumer.csv (10 rows, 2 columns, ~510-char multi-line messages) through the full pipeline. All 12 new tests pass. Full backend suite is 45/45 passing (`pytest backend/tests/ -n0`). Explicit results: POST /api/files returns sheets=['CSV'] for consumer.csv; GET /api/files/{id}/columns returns columns=['Mobile Number','Message'], total_rows=10, and the first preview Message equals the raw CSV Message byte-for-byte (length 510); POST /api/files/validate returns summary total=10 valid=10 invalid=0 duplicate=0 empty=0, every normalized number is +91XXXXXXXXXX (13 chars), and every validated message length is >300 chars (newlines preserved, only runs of space/tab collapsed per implementation); POST /api/batches creates 10 jobs; GET /api/batches/{id}/next atomically claims one at a time, POST /api/jobs/{msg_id}/result returns duplicate_ignored=true on second call, all 10 completed and GET /api/batches/{id} shows total=10 sent=10 pending=0 sending=0 failed=0; GET /api/batches/{id}/export?token=... returns an xlsx (openpyxl-parseable) with the expected 7 columns and all 10 long messages intact (length >300 chars each), first row matches (space-collapsed) source. GET /api/sample-template returns a valid xlsx with 'Mobile Number' and 'Message' headers (unauthenticated helper). Auth is still enforced: /api/dashboard, /api/files without header -> 403; /api/batches/{id}/export without token query -> 403. Frontend web smoke (viewport 390x844, DEMO_MODE): app bundles and mounts; Dashboard shows 'Demo mode - real SMS sending needs an Android build. Sends here are simulated.' banner and today's counts; Upload screen shows dropzone (.xlsx / .xls / .csv) and 'Sample template download karein' link; History and Settings tabs reachable; 0 console errors, 1 non-blocking RN Web warning (pre-existing shadow* deprecation), no red screen. Note per reviewer: the user's CSV has Hindi text already corrupted to '?' chars at the source; the backend preserves the given bytes exactly - not an app bug.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Global", "issues": ["Non-blocking RN Web warning: 'shadow*' style props deprecated (carry-over from iteration_1)"]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_consumer_csv_regression.py",
+    "/app/backend/tests/test_sms_gateway.py",
+    "/app/backend/tests/test_upload_formats.py",
+    "/app/test_reports/pytest/iteration_3_results.xml"
+  ],
+  "action_items": [
+    "Native-only follow-up (cannot be verified on web preview): on next compiled Android build, confirm the patched ExpoAndroidSmsSenderModule.kt uses SmsManager.divideMessage + sendMultipartTextMessage for >160-char SMS, and that a message like /tmp/consumer.csv row 1 (~510 chars) is delivered as ~4 concatenated parts instead of being truncated.",
+    "Optional (carry-over): migrate `shadow*` -> `boxShadow` to silence the RN Web deprecation warning."
+  ],
+  "critical_code_review_comments": [
+    "Backend /api/files, /api/files/{id}/columns and /api/files/validate correctly use pandas with dtype=str + keep_default_na=False, so quoted multi-line CSV cells (~510 chars with newlines) are preserved intact - verified byte-for-byte on the user's file.",
+    "classify_rows only collapses runs of ' '/'\\t' (re.sub r'[ \\t]+') and then strip() - it deliberately preserves newlines inside the message. Good.",
+    "/api/batches/{id}/next uses find_one_and_update({status:PENDING} -> SENDING) with sort=[('row',1)] - atomic claim, safe under concurrency.",
+    "/api/jobs/{id}/result guards the transition with {status:'SENDING'} on find_one_and_update, so duplicate reports return duplicate_ignored:true instead of overwriting - verified on the consumer.csv batch.",
+    "/api/batches/{id}/export uses secrets.compare_digest on the query token and streams a fresh xlsx built from sms_jobs (never the original file) - correct design, verified 403 on bad token and 200 with intact long messages on good token.",
+    "package.json postinstall:'patch-package' is a build-time concern only; no runtime code path changes on web/backend."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_consumer_csv_regression.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (12/12 new focused, 45/45 full suite sequentially)",
+    "frontend": "100% web smoke - app bundles, all 4 tabs mount, 'Sample template download karein' link visible on Upload, 0 console errors"
+  },
+  "seed_data_creation": "Uploaded consumer.csv once, created one batch (10 jobs) and marked all 10 SENT (simulated). Data persists in sms_jobs and batches; safe to leave (message content is the user's own CSV data with mobile numbers ending in 0/9 from their file).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Base URL from frontend/.env EXPO_PUBLIC_BACKEND_URL. Token via POST /api/gateway/setup (idempotent - always re-fetch, may rotate). Use header X-Gateway-Token for all mutations except /api/batches/{id}/export and /api/sample-template. Run backend tests with `pytest /app/backend/tests/ -n0` (parallel mode has the known TestTokenRotation cross-worker interference documented in iteration_2). The native multipart-SMS Kotlin patch is unreachable from web/Expo Go - only user's next Android build can verify it.",
+  "rca_of_issue": "No new issue in iteration_3 - regression clean. Prior iteration_2 note on shadow* RN Web deprecation warning still applies (cosmetic only)."
+}
