@@ -1,0 +1,168 @@
+{
+  "app_name": "Bulk SMS Gateway",
+  "personality": "1 iOS-Native Clean (fused with high-density utility focus)",
+  "personality_one_liner": "A sharp, highly readable, utility-first tool that acts as a private command center without feeling overwhelming.",
+  "color": {
+    "surface": "#F9FAFB",
+    "onSurface": "#111827",
+    "surfaceSecondary": "#FFFFFF",
+    "onSurfaceSecondary": "#1F2937",
+    "surfaceTertiary": "#F3F4F6",
+    "onSurfaceTertiary": "#374151",
+    "surfaceInverse": "#1F2937",
+    "onSurfaceInverse": "#F9FAFB",
+    "brand": "#1F2937",
+    "onBrand": "#FFFFFF",
+    "brandPrimary": "#111827",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#374151",
+    "onBrandSecondary": "#F3F4F6",
+    "brandTertiary": "#E5E7EB",
+    "onBrandTertiary": "#111827",
+    "success": "#059669",
+    "onSuccess": "#FFFFFF",
+    "warning": "#D97706",
+    "onWarning": "#FFFFFF",
+    "error": "#DC2626",
+    "onError": "#FFFFFF",
+    "info": "#4B5563",
+    "onInfo": "#FFFFFF",
+    "border": "#E5E7EB",
+    "borderStrong": "#D1D5DB",
+    "divider": "#F3F4F6",
+    "muted": "#6B7280"
+  },
+  "typography": {
+    "displayFontFamily": "Plus Jakarta Sans",
+    "textFontFamily": "Plus Jakarta Sans",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Ensure generous padding (md/lg) around content blocks. Use 2-column grids for numeric stats and list rows with generous minimum tap targets (44pt).",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 6,
+    "md": 12,
+    "lg": 20,
+    "pill": 999
+  },
+  "shadow_tier": "1",
+  "navigation": "bottom_tabs",
+  "icon_set": "Phosphor",
+  "glassmorphism": {
+    "enabled": "true",
+    "do's": [
+      "Use on sticky headers over scrolling content.",
+      "Use on the bottom tab bar.",
+      "Use on the floating action/progress bar during bulk sending."
+    ],
+    "dont's": [
+      "Do not use on list rows or form inputs.",
+      "Do not use on standard dashboard cards."
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "Dashboard",
+      "purpose": "A high-level command center showing live connection statuses and today's SMS sending metrics.",
+      "states": {
+        "loading": "Centered spinner with 'Checking gateway status...'",
+        "empty": "N/A for Dashboard metrics, zeros default.",
+        "error": "Error card showing 'Unable to load stats' with a Retry button."
+      },
+      "layout": "Top section: 3 horizontal pill badges for Gateway, SIM, and Network status (Green/Red). Middle section: Large primary metric card for 'Today's Sent SMS'. Bottom section: 2-column grid for 'Pending' and 'Failed' counts. Use large, legible numbers. 'Test SMS' quick action button at the bottom."
+    },
+    {
+      "name": "Upload & Preview",
+      "purpose": "Handles Excel/CSV file picking, column mapping, and row validation before sending.",
+      "states": {
+        "loading": "Spinner with 'Parsing file...'",
+        "empty": "Empty state illustration with 'Select an Excel or CSV file to begin'.",
+        "error": "Error banner showing validation failure or unsupported file."
+      },
+      "layout": "Step-based vertical flow. Step 1: File picker card. Step 2 (Mapping): A side-by-side table layout where left column is the uploaded file's header, right column is a dropdown to select system field (Mobile/Message). Step 3: Validation summary card (Total/Valid/Invalid). A sticky 'Preview & Send' CTA at the bottom."
+    },
+    {
+      "name": "Bulk Sending (Preview + Send)",
+      "purpose": "A preview table of the messages and the live execution control surface for the bulk send operation.",
+      "states": {
+        "loading": "Preparing batch...",
+        "empty": "No valid rows found in file.",
+        "error": "Failed to initiate sending."
+      },
+      "layout": "Top: Sticky progress bar that appears when sending starts, showing X of Y items and a percentage. Below: Live counts (Pending/Sent/Failed). Scrollable list of compact rows showing Mobile Number and Message preview. When sending is active, the sticky bottom CTA transforms into a segmented control for 'Pause / Resume / Stop'."
+    },
+    {
+      "name": "History",
+      "purpose": "A searchable, filterable archive of all SMS messages sent, pending, or failed.",
+      "states": {
+        "loading": "Loading history...",
+        "empty": "Empty folder illustration with 'No SMS history found'.",
+        "error": "Failed to load history, tap to retry."
+      },
+      "layout": "Sticky header with Search input and a horizontal scrolling row of filter chips (All, Sent, Failed, Pending). Body: A vertically scrolling list of cards. Each card shows Mobile number, Timestamp, Message snippet, and a Status badge (Success/Error/Warning) aligned to the right edge."
+    },
+    {
+      "name": "Gateway Settings",
+      "purpose": "Configuration surface for the local SMS gateway, API tokens, and SIM preferences.",
+      "states": {
+        "loading": "Loading settings...",
+        "empty": "N/A",
+        "error": "N/A"
+      },
+      "layout": "Standard iOS grouped list style. Group 1: Gateway Connection details (ID, Status). Group 2: Token Management (Generate/Copy/Revoke). Group 3: Sending Preferences (Delay slider defaulting to 3s, Default Country Code '+91', SIM selector)."
+    }
+  ],
+  "images": {
+    "history_empty": {
+      "url": "https://images.unsplash.com/photo-1468779036391-52341f60b55d?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzR8MHwxfHNlYXJjaHwxfHxlbXB0eSUyMGZvbGRlciUyMGZpbGUlMjBkb2N1bWVudHxlbnwwfHx8fDE3OTAwNTY1MTJ8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "Empty file folders representing no history"
+    },
+    "upload_empty": {
+      "url": "https://images.pexels.com/photos/95916/pexels-photo-95916.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Data analytics and documents on a desk"
+    }
+  },
+  "haptics": {
+    "cta_press": "impactLight",
+    "status_change": "notificationSuccess",
+    "error_state": "notificationError",
+    "filter_select": "selection",
+    "row_tap": "impactLight"
+  },
+  "instructions_to_main_agent": [
+    "Follow '1 iOS-Native Clean' personality but maintain strict utility density. Focus on readability over decorative UI.",
+    "Implement the UI exclusively in a Light Theme. Ensure strong contrast (near-black #1F2937 for primary branding instead of blue).",
+    "Ensure typography (Plus Jakarta Sans or system default sans-serif) gracefully falls back to device default for Hindi text rendering.",
+    "Use strict Green (#059669) for Connected/Sent statuses, Red (#DC2626) for Disconnected/Failed, and Amber (#D97706) for Pending. These colors are semantic and non-negotiable.",
+    "For the Upload screen, implement the mapping step as a clear, side-by-side UI where users align their file headers with the system fields (Mobile Number, Message).",
+    "In the Bulk Sending view, use a persistent, visually prominent sticky progress bar (glassmorphism enabled) that displays current item count out of total.",
+    "Ensure 'Pause/Resume/Stop' controls are easily accessible (sticky) when the bulk sending operation is running, avoiding deep scroll navigation to find them.",
+    "Ensure safe area is respected at the root, and apply `expo-glass-effect` for sticky headers/bars over scrolling list views."
+  ]
+}
