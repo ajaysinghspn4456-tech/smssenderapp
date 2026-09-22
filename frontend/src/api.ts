@@ -2,6 +2,9 @@
 // The gateway token lives in SecureStore (never in source) and is attached to
 // every request as the X-Gateway-Token header.
 
+import * as FileSystem from "expo-file-system/legacy";
+import { Platform } from "react-native";
+
 import { storage } from "@/src/utils/storage";
 
 const BASE = `${process.env.EXPO_PUBLIC_BACKEND_URL}/api`;
@@ -75,24 +78,54 @@ export type UploadResult = { file_id: string; filename: string; sheets: string[]
 
 export async function uploadFile(asset: { uri: string; name: string; mimeType?: string; file?: any }) {
   const token = await getStoredToken();
-  const form = new FormData();
-  if (asset.file) {
-    form.append("file", asset.file, asset.name);
-  } else {
-    form.append("file", {
-      uri: asset.uri,
-      name: asset.name,
-      type: asset.mimeType || "application/octet-stream",
-    } as any);
+
+  // Web: use a real Blob/File (Expo's fetch requires standards-compliant parts).
+  if (Platform.OS === "web") {
+    const form = new FormData();
+    if (asset.file) {
+      form.append("file", asset.file, asset.name);
+    } else {
+      const blob = await (await fetch(asset.uri)).blob();
+      form.append("file", blob, asset.name);
+    }
+    const res = await fetch(`${BASE}/files`, {
+      method: "POST",
+      headers: { "X-Gateway-Token": token },
+      body: form,
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(body?.detail || "Upload failed");
+    return body as UploadResult;
   }
-  const res = await fetch(`${BASE}/files`, {
-    method: "POST",
+
+  // Native: FileSystem.uploadAsync streams the file as multipart and avoids the
+  // "Unsupported FormDataPart implementation" error from the native fetch.
+  let uploadUri = asset.uri;
+  try {
+    // ensure the multipart filename keeps the real extension the backend checks
+    const dest = `${FileSystem.cacheDirectory}${Date.now()}_${asset.name}`;
+    await FileSystem.copyAsync({ from: asset.uri, to: dest });
+    uploadUri = dest;
+  } catch {
+    uploadUri = asset.uri;
+  }
+  const result = await FileSystem.uploadAsync(`${BASE}/files`, uploadUri, {
+    httpMethod: "POST",
+    uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+    fieldName: "file",
+    mimeType: asset.mimeType,
     headers: { "X-Gateway-Token": token },
-    body: form,
   });
-  const body = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(body?.detail || "Upload failed");
-  return body as UploadResult;
+  let parsed: any = null;
+  try {
+    parsed = result.body ? JSON.parse(result.body) : null;
+  } catch {
+    parsed = null;
+  }
+  if (result.status < 200 || result.status >= 300) {
+    throw new Error(parsed?.detail || `Upload failed (${result.status})`);
+  }
+  return parsed as UploadResult;
 }
 
 export type ColumnsResult = {

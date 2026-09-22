@@ -1,0 +1,46 @@
+{
+  "summary": "Iteration 2 focused on the bug-fix verification (native FileSystem.uploadAsync path can't be exercised on web, so backend /api/files is validated instead) plus regression of the full pipeline and the new /api/sample-template endpoint. Added /app/backend/tests/test_upload_formats.py with 9 targeted tests. All 9 new tests pass. Full suite (33 tests) also passes when run sequentially (`pytest -n0`). Two failures observed only in parallel mode of the whole suite are cross-worker token-rotation interference between TestTokenRotation and other suites, not product bugs. Backend /api/files correctly accepts .xlsx (sheets=['Sheet1']), .xls (sheets=['Sheet1']), .csv (sheets=['CSV']), and rejects .txt/.pdf with 400. Missing/invalid X-Gateway-Token returns 403. Full CSV pipeline (upload -> columns -> validate summary total/valid/invalid/duplicate/empty -> batch -> next -> jobs result idempotent w/ duplicate_ignored -> batch counts -> export xlsx) passes end-to-end. New GET /api/sample-template returns a valid xlsx with 'Mobile Number' and 'Message' columns and correct Content-Disposition, no auth required. Frontend web smoke test (mobile viewport 390x844): Upload tab loads without runtime errors, dropzone visible, testIDs pick-file-button and download-sample present, 'Sample template download karein' link renders, and all four tabs (Dashboard/Upload/History/Settings) navigate cleanly. Only non-blocking console warning is the previously reported 'shadow* style props deprecated' from RN Web 0.19+. Native Android FileSystem.uploadAsync path cannot be exercised on web preview per the reviewer's own note — final on-device verification is expected to be performed by the user on their next Android build.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "test suite (pytest-xdist)", "issue": "When the full suite runs in parallel, TestTokenRotation.test_regenerate_rotates rotates the gateway token mid-run and other workers using the module-scoped token fixture then get 403. Non-product bug: run with `pytest -n0` or restore the previous token at teardown."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Global", "issues": ["Non-blocking RN Web warning: 'shadow*' style props are deprecated. Use boxShadow (already reported in iteration_1)."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_upload_formats.py",
+    "/app/backend/tests/test_sms_gateway.py",
+    "/app/test_reports/pytest/iteration_2_results.xml",
+    "/app/test_reports/pytest/iteration_2_full_results.xml"
+  ],
+  "action_items": [
+    "Native-only verification: on next Android build, confirm the compiled app no longer emits 'Unsupported FormDataPart implementation' and that FileSystem.uploadAsync -> POST /api/files succeeds for .xlsx/.xls/.csv (backend contract verified here).",
+    "Optional test-quality cleanup: make TestTokenRotation restore the original token in a teardown so the whole suite is parallel-safe.",
+    "Optional (carry-over): migrate `shadow*` -> `boxShadow` and `props.pointerEvents` -> `style.pointerEvents` to silence RN Web deprecations."
+  ],
+  "critical_code_review_comments": [
+    "api.ts upload path is correct: Web branch uses FormData with Blob/File; native branch uses expo-file-system/legacy FileSystem.uploadAsync with fieldName 'file' and mimeType passed through - matches the FastAPI UploadFile parameter name.",
+    "Backend /api/files enforces .xlsx/.xls/.csv extension check, 15MB size cap, sheet-name detection (CSV -> ['CSV']), and audits each upload. Contract {file_id, filename, sheets} verified for all 3 file types.",
+    "GET /api/sample-template is unauthenticated (public helper) and returns a proper xlsx with correct MIME + Content-Disposition. Acceptable design choice for a downloadable template.",
+    "Duplicate result reporting on /api/jobs/{id}/result correctly returns duplicate_ignored: true via find_one_and_update guarded by status:'SENDING'."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_upload_formats.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (9/9 focused, 33/33 full suite sequentially)",
+    "frontend": "100% for web smoke - Upload screen and all 4 tabs render, testIDs present. Native Android path not testable on web preview by design."
+  },
+  "seed_data_creation": "test_upload_formats.py uploads TEST_-prefixed xlsx/xls/csv rows and completes one CSV batch (1 message marked SENT simulated). Safe to leave (TEST_ prefix).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Base URL from frontend/.env EXPO_PUBLIC_BACKEND_URL. Token obtained via POST /api/gateway/setup (idempotent). Run `pytest /app/backend/tests/ -n0` to avoid the cross-worker token rotation flakiness. CSV uploads present sheet name 'CSV'. The native Android FormData bug can only be verified on a compiled Android build - backend contract is confirmed here for all 3 formats.",
+  "rca_of_issue": "Reported bug 'Unsupported FormDataPart implementation' was a native React Native fetch limitation with non-standard FormDataPart shapes. Fix in api.ts uses FileSystem.uploadAsync on native (streams file directly as multipart with fieldName='file'), which bypasses the RN fetch's stricter FormData validation. Backend /api/files endpoint is unchanged and verified to accept the exact multipart request both paths produce. Web path unchanged - real Blob/File appended to FormData."
+}
