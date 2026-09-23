@@ -67,10 +67,10 @@ export const regenerateToken = () =>
 export const revokeToken = () =>
   request<{ token: string }>("/gateway/token/revoke", { method: "POST" });
 
-export const heartbeat = (sim_available: boolean, network_connected: boolean) =>
+export const heartbeat = (sim_available: boolean, network_connected: boolean, sms_permission: boolean) =>
   request<{ ok: boolean }>("/gateway/heartbeat", {
     method: "POST",
-    body: JSON.stringify({ sim_available, network_connected }),
+    body: JSON.stringify({ sim_available, network_connected, sms_permission }),
   });
 
 // ---- Files ---------------------------------------------------------------- //
@@ -173,16 +173,27 @@ export const createBatch = (body: {
   body: JSON.stringify(body),
 });
 
+export type CurrentActivity = {
+  job_id: string;
+  message_id: string;
+  mobile_number: string;
+  status: string;
+  attempts: number;
+} | null;
+
 export type BatchStatus = {
   batch_id: string;
   control_state: "running" | "paused" | "stopped";
   delay: number;
   filename?: string;
+  current_activity: CurrentActivity;
   total: number;
-  pending: number;
+  queued: number;
   sending: number;
   sent: number;
   failed: number;
+  retrying: number;
+  pending: number;
 };
 
 export const getBatch = (id: string) => request<BatchStatus>(`/batches/${id}`);
@@ -212,6 +223,7 @@ export const createTestSms = (mobile: string, message: string) =>
 // ---- History / dashboard -------------------------------------------------- //
 export type HistoryItem = {
   message_id: string;
+  job_id?: string;
   mobile_number: string;
   message: string;
   status: string;
@@ -219,6 +231,7 @@ export type HistoryItem = {
   updated_at: string;
   sent_at?: string | null;
   simulated?: boolean;
+  attempts?: number;
 };
 
 export const getHistory = (status: string, search: string) =>
@@ -231,11 +244,14 @@ export type Dashboard = {
   connected: boolean;
   sim_available: boolean;
   network_connected: boolean;
+  sms_permission: boolean;
+  gateway_state: "READY" | "BUSY" | "ERROR" | "DISCONNECTED";
+  current_job: { job_id: string; mobile_number: string; status: string } | null;
   today_total: number;
   today_sent: number;
   today_failed: number;
   today_pending: number;
-  last_activity: { mobile_number: string; status: string; timestamp: string } | null;
+  last_activity: { job_id?: string; mobile_number: string; status: string; timestamp: string } | null;
 };
 
 export const getDashboard = () => request<Dashboard>("/dashboard");

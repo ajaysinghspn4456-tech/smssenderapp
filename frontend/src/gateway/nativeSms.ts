@@ -57,6 +57,15 @@ export async function requestPhoneStatePermission(): Promise<PermissionState> {
   }
 }
 
+export async function checkSmsPermission(): Promise<boolean> {
+  if (Platform.OS !== "android") return DEMO_MODE; // web/demo: treat as granted for the flow
+  try {
+    return await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.SEND_SMS);
+  } catch {
+    return false;
+  }
+}
+
 export type SimCard = { id: number; displayName: string; carrierName: string; slotIndex?: number };
 
 export async function getSimCards(): Promise<SimCard[]> {

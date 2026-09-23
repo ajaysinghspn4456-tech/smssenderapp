@@ -20,7 +20,7 @@ import re
 import logging
 import secrets
 from pathlib import Path
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from typing import List, Optional, Annotated, Any
 
 import pandas as pd
@@ -82,7 +82,7 @@ def iso(dt: Optional[datetime]) -> Optional[str]:
 class GatewaySettings(BaseModel):
     gateway_id: str
     token: str
-    sending_delay: int = 3          # seconds between messages
+    sending_delay: int = 2          # seconds between messages (configurable)
     default_country_code: str = "+91"
     selected_sim: Optional[int] = None
     connected: bool = False
@@ -101,6 +101,14 @@ class SettingsUpdate(BaseModel):
 class Heartbeat(BaseModel):
     sim_available: bool = False
     network_connected: bool = False
+    sms_permission: bool = False
+
+
+# Queue tuning
+STUCK_TIMEOUT_SEC = 90          # a SENDING job idle longer than this is re-queued
+MAX_ATTEMPTS = 3                # total send attempts before permanent FAILED
+def retry_backoff(attempts: int) -> int:
+    return min(60, 10 * max(1, attempts))   # 10s, 20s, 30s ... capped at 60s
 
 
 class ValidateRequest(BaseModel):
@@ -155,6 +163,18 @@ async def audit(action: str, detail: dict, request: Optional[Request] = None):
         "created_at": iso(now_utc()),
     }
     await db.system_logs.insert_one(entry)
+
+
+async def next_job_id() -> str:
+    """Human-friendly, monotonically increasing per-day job id: SMS-YYMMDD-000001."""
+    day = datetime.now(timezone.utc).strftime("%y%m%d")
+    doc = await db.counters.find_one_and_update(
+        {"_id": f"job_{day}"},
+        {"$inc": {"seq": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return f"SMS-{day}-{doc['seq']:06d}"
 
 
 # --------------------------------------------------------------------------- #
@@ -332,6 +352,7 @@ async def heartbeat(body: Heartbeat, settings: dict = Depends(require_token)):
             "connected": True,
             "sim_available": body.sim_available,
             "network_connected": body.network_connected,
+            "sms_permission": body.sms_permission,
             "last_heartbeat": iso(now_utc()),
         }},
     )
@@ -429,7 +450,7 @@ async def create_batch(body: CreateBatchRequest, request: Request,
         "sheet": body.sheet,
         "control_state": "running",
         "total": len(valid_rows),
-        "delay": settings.get("sending_delay", 3),
+        "delay": settings.get("sending_delay", 2),
         "created_at": iso(now_utc()),
     }
     batch_result = await db.batches.insert_one(batch)
@@ -439,11 +460,15 @@ async def create_batch(body: CreateBatchRequest, request: Request,
     for i, r in enumerate(valid_rows):
         jobs.append({
             "message_id": f"MSG-{batch_id[-6:]}-{r['row']:05d}",
+            "job_id": await next_job_id(),
             "batch_id": batch_id,
             "row": r["row"],
             "mobile_number": r["mobile"],
             "message": r["message"],
-            "status": "PENDING",
+            "status": "QUEUED",
+            "attempts": 0,
+            "max_attempts": MAX_ATTEMPTS,
+            "next_attempt_at": None,
             "error_message": None,
             "simulated": False,
             "is_test": False,
@@ -456,15 +481,40 @@ async def create_batch(body: CreateBatchRequest, request: Request,
 
 
 async def _batch_counts(batch_id: str) -> dict:
-    counts = {"PENDING": 0, "SENDING": 0, "SENT": 0, "FAILED": 0}
+    raw = {"QUEUED": 0, "PENDING": 0, "SENDING": 0, "SENT": 0, "FAILED": 0, "RETRYING": 0}
     cursor = db.sms_jobs.aggregate([
         {"$match": {"batch_id": batch_id}},
         {"$group": {"_id": "$status", "n": {"$sum": 1}}},
     ])
     async for c in cursor:
-        counts[c["_id"]] = c["n"]
-    total = sum(counts.values())
-    return {"total": total, **{k.lower(): v for k, v in counts.items()}}
+        raw[c["_id"]] = c["n"]
+    queued = raw["QUEUED"] + raw["PENDING"]
+    total = sum(raw.values())
+    return {
+        "total": total,
+        "queued": queued,
+        "sending": raw["SENDING"],
+        "sent": raw["SENT"],
+        "failed": raw["FAILED"],
+        "retrying": raw["RETRYING"],
+        # backward-compatible: everything still waiting to be delivered
+        "pending": queued + raw["RETRYING"],
+    }
+
+
+async def _current_activity(batch_id: str) -> Optional[dict]:
+    job = await db.sms_jobs.find_one(
+        {"batch_id": batch_id, "status": "SENDING"}, sort=[("updated_at", -1)]
+    )
+    if not job:
+        return None
+    return {
+        "job_id": job.get("job_id") or job.get("message_id"),
+        "message_id": job.get("message_id"),
+        "mobile_number": job.get("mobile_number"),
+        "status": "SENDING",
+        "attempts": job.get("attempts", 1),
+    }
 
 
 @api_router.get("/batches/{batch_id}")
@@ -476,11 +526,13 @@ async def get_batch(batch_id: str, settings: dict = Depends(require_token)):
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
     counts = await _batch_counts(batch_id)
+    activity = await _current_activity(batch_id)
     return {
         "batch_id": batch_id,
         "control_state": batch["control_state"],
-        "delay": batch.get("delay", 3),
+        "delay": batch.get("delay", 2),
         "filename": batch.get("filename"),
+        "current_activity": activity,
         **counts,
     }
 
@@ -496,11 +548,11 @@ async def control_batch(batch_id: str, body: ControlRequest, request: Request,
     except Exception:
         raise HTTPException(status_code=404, detail="Batch not found")
     await db.batches.update_one({"_id": oid}, {"$set": {"control_state": state}})
-    # if a message was mid-SENDING when paused/stopped, leave it; requeue on resume
+    # if a message was mid-SENDING when paused/stopped, put it back so it is not lost
     if state in ("paused", "stopped"):
         await db.sms_jobs.update_many(
             {"batch_id": batch_id, "status": "SENDING"},
-            {"$set": {"status": "PENDING", "updated_at": iso(now_utc())}},
+            {"$set": {"status": "QUEUED", "next_attempt_at": None, "updated_at": iso(now_utc())}},
         )
     await audit("batch_control", {"batch_id": batch_id, "action": body.action}, request)
     return await get_batch(batch_id, settings)
@@ -508,26 +560,42 @@ async def control_batch(batch_id: str, body: ControlRequest, request: Request,
 
 @api_router.get("/batches/{batch_id}/next")
 async def next_job(batch_id: str, settings: dict = Depends(require_token)):
-    """Atomically claim the next pending job (marks it SENDING). Returns null
-    when the batch is paused/stopped or nothing pending."""
+    """Atomically claim the next deliverable job (marks it SENDING). Self-heals
+    jobs stuck in SENDING (e.g. the app was frozen/killed mid-send) by requeueing
+    them. Returns null when paused/stopped or nothing is ready right now."""
     try:
         batch = await db.batches.find_one({"_id": ObjectId(batch_id)})
     except Exception:
         batch = None
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
+
+    # Recover orphaned SENDING jobs regardless of control state.
+    stuck_before = iso(now_utc() - timedelta(seconds=STUCK_TIMEOUT_SEC))
+    await db.sms_jobs.update_many(
+        {"batch_id": batch_id, "status": "SENDING", "updated_at": {"$lt": stuck_before}},
+        {"$set": {"status": "RETRYING", "next_attempt_at": iso(now_utc()),
+                  "updated_at": iso(now_utc())}},
+    )
+
     if batch["control_state"] != "running":
         return {"job": None, "control_state": batch["control_state"]}
 
+    now_iso = iso(now_utc())
     job = await db.sms_jobs.find_one_and_update(
-        {"batch_id": batch_id, "status": "PENDING"},
-        {"$set": {"status": "SENDING", "updated_at": iso(now_utc())}},
+        {
+            "batch_id": batch_id,
+            "status": {"$in": ["QUEUED", "PENDING", "RETRYING"]},
+            "$or": [{"next_attempt_at": None}, {"next_attempt_at": {"$lte": now_iso}}],
+        },
+        {"$set": {"status": "SENDING", "updated_at": now_iso}, "$inc": {"attempts": 1}},
         sort=[("row", 1)],
+        return_document=ReturnDocument.AFTER,
     )
     if not job:
         return {"job": None, "control_state": "running"}
     job.pop("_id", None)
-    return {"job": job, "control_state": "running", "delay": batch.get("delay", 3)}
+    return {"job": job, "control_state": "running", "delay": batch.get("delay", 2)}
 
 
 @api_router.post("/jobs/{message_id}/result")
@@ -535,31 +603,55 @@ async def report_result(message_id: str, body: JobResult, request: Request,
                         settings: dict = Depends(require_token)):
     if body.status not in ("sent", "failed"):
         raise HTTPException(status_code=400, detail="Invalid status")
-    new_status = body.status.upper()
-    # Idempotent: only a job currently SENDING can transition; avoids duplicates.
-    result = await db.sms_jobs.find_one_and_update(
-        {"message_id": message_id, "status": "SENDING"},
-        {"$set": {
-            "status": new_status,
-            "error_message": body.error_message,
-            "simulated": body.simulated,
-            "sent_at": iso(now_utc()) if new_status == "SENT" else None,
-            "updated_at": iso(now_utc()),
-        }},
-        return_document=ReturnDocument.AFTER,
-    )
 
-    if not result:
-        current = await db.sms_jobs.find_one({"message_id": message_id})
-        if not current:
-            raise HTTPException(status_code=404, detail="Job not found")
-        current.pop("_id", None)
-        return {"message_id": message_id, "status": current["status"],
-                "duplicate_ignored": True}
+    current = await db.sms_jobs.find_one({"message_id": message_id})
+    if not current:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # Idempotent: only a job currently SENDING can transition; avoids duplicates.
+    if current["status"] != "SENDING":
+        return {"message_id": message_id, "status": current["status"], "duplicate_ignored": True}
+
+    if body.status == "sent":
+        update = {
+            "status": "SENT",
+            "error_message": None,
+            "simulated": body.simulated,
+            "sent_at": iso(now_utc()),
+            "updated_at": iso(now_utc()),
+        }
+        new_status = "SENT"
+    else:
+        attempts = current.get("attempts", 1)
+        max_a = current.get("max_attempts", MAX_ATTEMPTS)
+        if attempts < max_a:
+            # temporary failure -> schedule a controlled retry
+            update = {
+                "status": "RETRYING",
+                "error_message": body.error_message,
+                "simulated": body.simulated,
+                "next_attempt_at": iso(now_utc() + timedelta(seconds=retry_backoff(attempts))),
+                "updated_at": iso(now_utc()),
+            }
+            new_status = "RETRYING"
+        else:
+            update = {
+                "status": "FAILED",
+                "error_message": body.error_message,
+                "simulated": body.simulated,
+                "updated_at": iso(now_utc()),
+            }
+            new_status = "FAILED"
+
+    res = await db.sms_jobs.update_one(
+        {"message_id": message_id, "status": "SENDING"}, {"$set": update}
+    )
+    if res.matched_count == 0:
+        latest = await db.sms_jobs.find_one({"message_id": message_id})
+        return {"message_id": message_id, "status": latest["status"], "duplicate_ignored": True}
     await audit("job_result", {"message_id": message_id, "status": new_status,
                                "simulated": body.simulated}, request)
     return {"message_id": message_id, "status": new_status,
-            "mobile_number": result["mobile_number"], "timestamp": iso(now_utc())}
+            "mobile_number": current["mobile_number"], "timestamp": iso(now_utc())}
 
 
 # --------------------------------------------------------------------------- #
@@ -576,11 +668,15 @@ async def create_test_sms(body: TestSmsRequest, request: Request,
     message_id = f"TEST-{secrets.token_hex(4)}"
     job = {
         "message_id": message_id,
+        "job_id": await next_job_id(),
         "batch_id": "TEST",
         "row": 0,
         "mobile_number": normalized,
         "message": body.message.strip(),
         "status": "SENDING",           # claimed immediately, ready for native send
+        "attempts": 1,
+        "max_attempts": 1,             # a test is one-shot, no auto-retry
+        "next_attempt_at": None,
         "error_message": None,
         "simulated": False,
         "is_test": True,
@@ -626,7 +722,7 @@ async def dashboard(settings: dict = Depends(require_token)):
         {"$match": {"created_at": {"$gte": today}}},
         {"$group": {"_id": "$status", "n": {"$sum": 1}}},
     ]
-    counts = {"SENT": 0, "FAILED": 0, "PENDING": 0, "SENDING": 0}
+    counts = {"SENT": 0, "FAILED": 0, "QUEUED": 0, "PENDING": 0, "SENDING": 0, "RETRYING": 0}
     async for c in db.sms_jobs.aggregate(pipeline):
         counts[c["_id"]] = c["n"]
 
@@ -634,6 +730,7 @@ async def dashboard(settings: dict = Depends(require_token)):
     last_activity = None
     if last:
         last_activity = {
+            "job_id": last.get("job_id") or last.get("message_id"),
             "mobile_number": last["mobile_number"],
             "status": last["status"],
             "timestamp": last.get("updated_at"),
@@ -649,15 +746,38 @@ async def dashboard(settings: dict = Depends(require_token)):
         except Exception:
             connected = False
 
+    # anything actively sending right now => gateway BUSY
+    active = await db.sms_jobs.find_one({"status": "SENDING"}, sort=[("updated_at", -1)])
+    if not connected:
+        gateway_state = "DISCONNECTED"
+    elif not settings.get("sms_permission", False):
+        gateway_state = "ERROR"
+    elif active:
+        gateway_state = "BUSY"
+    else:
+        gateway_state = "READY"
+
+    current_job = None
+    if active:
+        current_job = {
+            "job_id": active.get("job_id") or active.get("message_id"),
+            "mobile_number": active.get("mobile_number"),
+            "status": "SENDING",
+        }
+
+    today_pending = counts["QUEUED"] + counts["PENDING"] + counts["SENDING"] + counts["RETRYING"]
     return {
         "gateway_id": settings.get("gateway_id"),
         "connected": connected,
         "sim_available": settings.get("sim_available", False),
         "network_connected": settings.get("network_connected", False),
+        "sms_permission": settings.get("sms_permission", False),
+        "gateway_state": gateway_state,
+        "current_job": current_job,
         "today_total": sum(counts.values()),
         "today_sent": counts["SENT"],
         "today_failed": counts["FAILED"],
-        "today_pending": counts["PENDING"] + counts["SENDING"],
+        "today_pending": today_pending,
         "last_activity": last_activity,
     }
 

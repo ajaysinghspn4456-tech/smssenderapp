@@ -1,0 +1,49 @@
+{
+  "summary": "Iteration 4 verifies the NEW queue/retry/self-heal/dashboard rework. Added /app/backend/tests/test_new_queue_features.py (12 focused tests) covering: (a) Full 3-attempt retry cap - one job driven QUEUED->SENDING(1)->RETRYING->SENDING(2)->RETRYING->SENDING(3)->FAILED with real 10s and 20s backoff waits between claims (total ~135s runtime); (b) Counts identity total==sent+failed+sending+retrying+queued AND pending==queued+retrying asserted at EVERY transition; (c) Self-heal of stuck SENDING (claimed job, waited 95s > STUCK_TIMEOUT_SEC=90, next GET /batches/{id}/next self-healed it to RETRYING and re-claimed it - attempts went 1 -> 2 on same message_id); (d) Idempotency preserved - second POST /jobs/{msg_id}/result returned duplicate_ignored:true and did NOT overwrite SENT with failed; (e) pause requeues SENDING->QUEUED (queued=2, sending=0, control_state=paused, /next returns job:null); resume + reclaim works; stop also requeues; (f) dashboard exposes sms_permission, gateway_state (READY/BUSY/ERROR/DISCONNECTED), current_job; heartbeat with sms_permission=false flips gateway_state to ERROR while connected; (g) job_id format SMS-YYMMDD-NNNNNN validated on both /next payload and history items; sample-template still public 200 xlsx; auth 403 without/invalid token. Result: 12/12 new tests PASS in 135s. Full suite 49/49 pass (test_sms_gateway.py + test_upload_formats.py + test_new_queue_features.py); the only 8 errors are file-not-found for /tmp/consumer.csv from iteration_3 - environmental leftover, NOT a code regression. Frontend web smoke (mobile viewport 390x844, DEMO_MODE): Dashboard now shows the new 'Gateway status' card with READY badge and 4 rows (Phone Connected, SIM Available, SMS Permission Granted, Network Connected), plus Today's SMS Sent (11), Pending (7), Failed (2), LAST ACTIVITY +919876543210 SENT. All 4 tabs (Dashboard/Upload/History/Settings) mount and are reachable; Upload dropzone shows .xlsx/.xls/.csv and 'Sample template download karein' link; History lists items with MSG-... ids and Sent/Pending/Failed badges. 0 console errors, 1 non-blocking pre-existing shadow* deprecation warning. Native-only keep-awake/AppState resume/multipart-SMS not testable on web (per reviewer note) - no web regression.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Global", "issues": ["Non-blocking RN Web deprecation warning: 'shadow*' style props (carry-over from iteration_1/2/3)"]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_new_queue_features.py",
+    "/app/backend/tests/test_sms_gateway.py",
+    "/app/backend/tests/test_upload_formats.py",
+    "/app/test_reports/pytest/iteration_4_results.xml",
+    "/app/test_reports/pytest/iteration_4_full_results.xml"
+  ],
+  "action_items": [
+    "None blocking. Optional carry-over: migrate `shadow*` -> `boxShadow` in styles to silence the RN Web deprecation warning.",
+    "Optional: remove or make optional the /tmp/consumer.csv dependency in /app/backend/tests/test_consumer_csv_regression.py so full-suite runs are clean in fresh environments (it currently errors 8/8 tests when the file is absent).",
+    "Native-only follow-ups (unreachable on web preview, for next Android build): (i) confirm keep-awake keeps CPU on while a batch runs and app is backgrounded; (ii) confirm AppState 'active' resume immediately re-drives the loop (calls /next); (iii) confirm multipart SmsManager sendMultipartTextMessage is used for >160-char SMS."
+  ],
+  "critical_code_review_comments": [
+    "Retry policy in POST /api/jobs/{message_id}/result is correct: attempts<max -> RETRYING with next_attempt_at = now + retry_backoff(attempts)*s (10s, 20s), attempts==max -> FAILED. Guarded by {status:'SENDING'} filter so races collapse to duplicate_ignored.",
+    "/api/batches/{id}/next self-heals with a single update_many({status:'SENDING', updated_at:{'$lt': now-90s}} -> RETRYING with next_attempt_at=now) BEFORE the find_one_and_update claim, so the same request can immediately re-claim the stuck job. Verified with 95s wait: attempts went 1 -> 2 on same message_id.",
+    "Counts identity is preserved because _batch_counts sums by status and pending is derived (queued+retrying). Verified: total == sent+failed+sending+retrying+queued at every step of the 3-attempt drive-to-FAILED test.",
+    "Pause/stop correctly move SENDING back to QUEUED and clear next_attempt_at, so a paused job is not stuck waiting for a retry backoff after resume.",
+    "next_attempt_at is stored as ISO8601 UTC string and compared with $lte lexicographically - this is safe as long as all values use the same UTC format from iso(now_utc()); confirmed here.",
+    "Dashboard gateway_state priority is DISCONNECTED > ERROR(no sms_permission) > BUSY(any SENDING) > READY - matches spec.",
+    "MongoDB _id is popped everywhere it is returned to the client (get_settings, next_job, history, batch export loop). Good.",
+    "Auth uses secrets.compare_digest - constant-time comparison. Good."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_new_queue_features.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% on new features (12/12 test_new_queue_features.py) and 100% on active regression (49/49 across active suites). test_consumer_csv_regression.py 8 errors are environmental (missing /tmp/consumer.csv), not code failures.",
+    "frontend": "100% web DEMO_MODE smoke - Gateway status card renders with all 4 rows + state badge, all 4 tabs reachable, 0 console errors."
+  },
+  "seed_data_creation": "Created a few small xlsx batches (mobiles 9000000001..7) to drive the retry/self-heal/pause/stop tests. Jobs end in SENT/FAILED states; safe to leave in sms_jobs collection.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Base URL from frontend/.env EXPO_PUBLIC_BACKEND_URL. Token via POST /api/gateway/setup (idempotent; may rotate - always re-fetch). Header X-Gateway-Token on all mutations except /api/sample-template and /api/batches/{id}/export (which takes ?token=). Retry backoff is 10s * min(attempts,6) capped at 60s, so drive-to-FAILED requires ~30s of sleep between claims; new test does this and finishes in ~135s. Self-heal test waits 95s > STUCK_TIMEOUT_SEC=90 - keep -n0 (sequential) to avoid other tests confusing counts. Run: `pytest /app/backend/tests/test_new_queue_features.py -v -n0`. If test_consumer_csv_regression.py is needed, restore /tmp/consumer.csv first. Native SMS features (keep-awake, AppState resume, multipart send) cannot be verified on web preview - they need an Android build.",
+  "rca_of_issue": "No regressions. The original 'stuck at ~12/50 overnight' issue is architecturally resolved by (1) making SENDING -> RETRYING/FAILED transitions server-owned with attempts+max_attempts and next_attempt_at (so a killed foreground loop cannot leave jobs in SENDING permanently), and (2) self-healing SENDING jobs older than 90s inside /next, plus (3) pause/stop always requeueing SENDING->QUEUED. All three behaviours are covered by the new test suite and PASS."
+}

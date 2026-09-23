@@ -4,7 +4,7 @@ import { Platform } from "react-native";
 import { House, UploadSimple, ClockCounterClockwise, GearSix } from "phosphor-react-native";
 
 import { heartbeat } from "@/src/api";
-import { DEMO_MODE, getSimCards } from "@/src/gateway/nativeSms";
+import { DEMO_MODE, checkSmsPermission, getSimCards } from "@/src/gateway/nativeSms";
 import { useTheme } from "@/src/theme";
 
 function useHeartbeat() {
@@ -16,8 +16,9 @@ function useHeartbeat() {
         const sims = await getSimCards();
         simAvailable = sims.length > 0;
       }
+      const perm = await checkSmsPermission();
       try {
-        await heartbeat(simAvailable, true);
+        await heartbeat(simAvailable, true, perm);
       } catch {
         // offline / not set up yet — ignore
       }

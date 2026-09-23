@@ -2,12 +2,34 @@ import { useQuery } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
 import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { CellSignalFull, PaperPlaneTilt, SimCard, TestTube } from "phosphor-react-native";
+import { PaperPlaneTilt, TestTube } from "phosphor-react-native";
 
 import { getDashboard } from "@/src/api";
 import { DemoBanner, Button, Card, StatCard, StatusBadge } from "@/src/components/ui";
 import { DEMO_MODE } from "@/src/gateway/nativeSms";
 import { makeStyles, spacing, useTheme } from "@/src/theme";
+
+function StatusLine({
+  label,
+  ok,
+  okText,
+  noText,
+  testID,
+}: {
+  label: string;
+  ok: boolean;
+  okText: string;
+  noText: string;
+  testID?: string;
+}) {
+  const styles = useStyles();
+  return (
+    <View style={styles.statusLine} testID={testID}>
+      <Text style={styles.statusLineLabel}>{label}</Text>
+      <StatusBadge kind={ok ? "success" : "error"} label={ok ? okText : noText} />
+    </View>
+  );
+}
 
 export default function Dashboard() {
   const styles = useStyles();
@@ -18,12 +40,8 @@ export default function Dashboard() {
   const { data, isLoading, refetch, isRefetching, isError } = useQuery({
     queryKey: ["dashboard"],
     queryFn: getDashboard,
-    refetchInterval: 5000,
+    refetchInterval: 3000,
   });
-
-  function statusKind(ok: boolean) {
-    return ok ? ("success" as const) : ("error" as const);
-  }
 
   return (
     <ScrollView
@@ -52,20 +70,27 @@ export default function Dashboard() {
         </Card>
       ) : (
         <>
-          <View style={styles.badgeRow}>
-            <StatusBadge
-              testID="gateway-status-badge"
-              kind={statusKind(!!data?.connected)}
-              label={data?.connected ? "Connected" : "Offline"}
-            />
-            <View style={styles.badgeItem}>
-              <SimCard size={16} color={data?.sim_available ? colors.success : colors.error} weight="fill" />
-              <StatusBadge kind={statusKind(!!data?.sim_available)} label={data?.sim_available ? "SIM OK" : "No SIM"} />
-            </View>
-            <View style={styles.badgeItem}>
-              <CellSignalFull size={16} color={data?.network_connected ? colors.success : colors.error} weight="fill" />
-              <StatusBadge kind={statusKind(!!data?.network_connected)} label={data?.network_connected ? "Network" : "No Net"} />
-            </View>
+          <View style={styles.statusWrap}>
+            <Card testID="gateway-status-card">
+              <View style={styles.statusHeaderRow}>
+                <Text style={styles.cardHeading}>Gateway status</Text>
+                <StatusBadge
+                  testID="gateway-state-badge"
+                  kind={
+                    data?.gateway_state === "READY" || data?.gateway_state === "BUSY"
+                      ? "success"
+                      : data?.gateway_state === "ERROR"
+                        ? "warning"
+                        : "error"
+                  }
+                  label={data?.gateway_state ?? "—"}
+                />
+              </View>
+              <StatusLine label="Phone" ok={!!data?.connected} okText="Connected" noText="Disconnected" testID="status-phone" />
+              <StatusLine label="SIM" ok={!!data?.sim_available} okText="Available" noText="Not available" testID="status-sim" />
+              <StatusLine label="SMS Permission" ok={!!data?.sms_permission} okText="Granted" noText="Denied" testID="status-permission" />
+              <StatusLine label="Network" ok={!!data?.network_connected} okText="Connected" noText="Disconnected" testID="status-network" />
+            </Card>
           </View>
 
           <View style={styles.section}>
@@ -80,7 +105,14 @@ export default function Dashboard() {
               <StatCard testID="stat-failed" label="Failed" value={data?.today_failed ?? 0} kind="error" />
             </View>
 
-            {data?.last_activity ? (
+            {data?.current_job ? (
+              <Card style={styles.activity} testID="current-job-card">
+                <Text style={styles.activityLabel}>Current job</Text>
+                <Text style={styles.activityText}>
+                  {data.current_job.job_id} · {data.current_job.mobile_number}
+                </Text>
+              </Card>
+            ) : data?.last_activity ? (
               <Card style={styles.activity}>
                 <Text style={styles.activityLabel}>Last activity</Text>
                 <Text style={styles.activityText}>
@@ -132,6 +164,11 @@ const useStyles = makeStyles((colors) => ({
     alignItems: "center",
   },
   badgeItem: { flexDirection: "row", alignItems: "center", gap: 4 },
+  statusWrap: { paddingHorizontal: spacing.lg, marginBottom: spacing.md },
+  statusHeaderRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: spacing.sm },
+  cardHeading: { fontSize: 15, fontWeight: "800", color: colors.onSurface },
+  statusLine: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 7 },
+  statusLineLabel: { fontSize: 14, color: colors.onSurfaceSecondary, fontWeight: "600" },
   section: { paddingHorizontal: spacing.lg, gap: spacing.md },
   heroCard: { backgroundColor: colors.surfaceInverse, borderColor: colors.surfaceInverse },
   heroLabel: { color: colors.onSurfaceInverse, opacity: 0.7, fontSize: 14, fontWeight: "600" },
