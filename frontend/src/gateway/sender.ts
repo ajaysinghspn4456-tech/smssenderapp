@@ -11,6 +11,7 @@
 // restarts.
 
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
+import { Platform } from "react-native";
 
 import { getBatch, getSettings, nextBatchJobs, reportResultsBulk } from "@/src/api";
 import { DEMO_MODE, requestSmsPermission, sendOneSms } from "@/src/gateway/nativeSms";
@@ -29,6 +30,29 @@ export const hasForegroundService = !!BackgroundService;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+function safeActivateKeepAwake() {
+  if (Platform.OS === "web") return;
+  Promise.resolve(activateKeepAwakeAsync(KA_TAG)).catch(() => {});
+}
+
+function safeDeactivateKeepAwake() {
+  if (Platform.OS === "web") return;
+  try {
+    Promise.resolve(deactivateKeepAwake(KA_TAG)).catch(() => {});
+  } catch {
+    // not activated — ignore
+  }
+}
+
+// A send must never hang the whole job — cap each attempt.
+const SEND_TIMEOUT_MS = 30000;
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error("Send timed out")), ms)),
+  ]);
+}
+
 // fallback-loop control
 let localRunning = false;
 
@@ -41,7 +65,10 @@ async function processBatch(
 ) {
   const settings = await getSettings().catch(() => null);
   const simId = settings?.selected_sim ?? undefined;
-  const delayMs = Math.max(0, (settings?.sending_delay ?? 2)) * 1000;
+  const delayMs = Math.max(0, (settings?.sending_delay ?? 1)) * 1000;
+  const chunkSize = Math.max(0, settings?.chunk_size ?? 0);
+  const chunkPauseMs = Math.max(0, settings?.chunk_pause ?? 0) * 1000;
+  let sentSincePause = 0;
 
   if (!DEMO_MODE) {
     const p = await requestSmsPermission();
@@ -74,17 +101,31 @@ async function processBatch(
     for (const job of res.jobs) {
       if (!isAlive()) break;
       try {
-        const r = await sendOneSms(job.mobile_number, job.message, simId);
+        const r = await withTimeout(sendOneSms(job.mobile_number, job.message, simId), SEND_TIMEOUT_MS);
         results.push({ message_id: job.message_id, status: "sent", simulated: r.simulated });
       } catch (e: any) {
         results.push({ message_id: job.message_id, status: "failed", error_message: String(e?.message || e) });
       }
-      if (delayMs) await sleep(delayMs);
+      // Auto batch pacing: pause after every `chunkSize` messages so the device/
+      // carrier SMS quota window can breathe on big lists (respects OS limits).
+      sentSincePause += 1;
+      if (chunkSize > 0 && chunkPauseMs > 0 && sentSincePause >= chunkSize) {
+        sentSincePause = 0;
+        if (results.length) {
+          await reportResultsBulk(results).catch(() => {});
+          results.length = 0;
+        }
+        await sleep(chunkPauseMs);
+      } else if (delayMs) {
+        await sleep(delayMs);
+      }
     }
-    try {
-      await reportResultsBulk(results);
-    } catch {
-      // backend self-heals SENDING jobs into retries if we fail to report
+    if (results.length) {
+      try {
+        await reportResultsBulk(results);
+      } catch {
+        // backend self-heals SENDING jobs into retries if we fail to report
+      }
     }
     try {
       const b = await getBatch(batchId);
@@ -95,55 +136,67 @@ async function processBatch(
   }
 }
 
-// The function the foreground service runs. It must keep awaiting while active.
-async function foregroundTask(args?: { batchId?: string }) {
-  const batchId = args?.batchId;
-  if (!batchId) return;
-  await processBatch(
-    batchId,
-    () => BackgroundService.isRunning(),
-    async (sent, total) => {
-      try {
-        await BackgroundService.updateNotification({ taskDesc: `${sent} / ${total} sent` });
-      } catch {
-        /* ignore */
-      }
-    },
-  );
-  // finished on its own
-  try {
-    await BackgroundService.stop();
-  } catch {
-    /* ignore */
+// The foreground service runs only as a keep-alive so the OS does not freeze/
+// kill the process while minimised or the screen is locked. The ACTUAL sending
+// is always driven by the in-process loop in startSending(), so a flaky service
+// launch can never leave the job stuck with nothing sending.
+async function keepAliveTask() {
+  while (localRunning) {
+    await sleep(1000);
   }
 }
 
 export async function startSending(batchId: string, onProgress?: (sent: number, total: number) => void) {
-  if (hasForegroundService && !DEMO_MODE) {
-    if (BackgroundService.isRunning()) return;
-    await BackgroundService.start(foregroundTask, {
-      taskName: "uppcl-sms",
-      taskTitle: "UPPCL Suchna Seva – Sending SMS",
-      taskDesc: "Starting…",
-      taskIcon: { name: "ic_launcher", type: "mipmap" },
-      color: "#1F2937",
-      parameters: { batchId },
-      linkingURI: "frontend://",
-    });
-    return;
-  }
-  // Fallback: in-process loop kept awake (web / Expo Go / module missing)
-  if (localRunning) return;
+  if (localRunning) return; // already running
   localRunning = true;
-  activateKeepAwakeAsync(KA_TAG).catch(() => {});
-  await processBatch(batchId, () => localRunning, onProgress);
-  localRunning = false;
-  deactivateKeepAwake(KA_TAG);
+
+  // best-effort foreground service (Android build only) — never fatal
+  if (hasForegroundService && !DEMO_MODE) {
+    try {
+      if (!BackgroundService.isRunning()) {
+        await BackgroundService.start(keepAliveTask, {
+          taskName: "uppcl-sms",
+          taskTitle: "UPPCL Suchna Seva – Sending SMS",
+          taskDesc: "Starting…",
+          taskIcon: { name: "ic_launcher", type: "mipmap" },
+          color: "#1565C0",
+          parameters: { batchId },
+          linkingURI: "frontend://",
+        });
+      }
+    } catch {
+      // service failed to start — fall back to keep-awake only, sending still runs
+    }
+  }
+  safeActivateKeepAwake();
+
+  try {
+    await processBatch(batchId, () => localRunning, async (sent, total) => {
+      onProgress?.(sent, total);
+      if (hasForegroundService) {
+        try {
+          await BackgroundService.updateNotification({ taskDesc: `${sent} / ${total} sent` });
+        } catch {
+          /* ignore */
+        }
+      }
+    });
+  } finally {
+    localRunning = false;
+    safeDeactivateKeepAwake();
+    if (hasForegroundService) {
+      try {
+        if (BackgroundService.isRunning()) await BackgroundService.stop();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
 }
 
 export async function stopSending() {
   localRunning = false;
-  deactivateKeepAwake(KA_TAG);
+  safeDeactivateKeepAwake();
   if (hasForegroundService) {
     try {
       if (BackgroundService.isRunning()) await BackgroundService.stop();
@@ -154,6 +207,5 @@ export async function stopSending() {
 }
 
 export function isSending(): boolean {
-  if (hasForegroundService && BackgroundService.isRunning()) return true;
   return localRunning;
 }

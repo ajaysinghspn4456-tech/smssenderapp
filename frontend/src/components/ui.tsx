@@ -132,9 +132,9 @@ export function StatCard({
         ? colors.error
         : kind === "warning"
           ? colors.warning
-          : colors.onSurface;
+          : colors.brandPrimary;
   return (
-    <View testID={testID} style={styles.statCard}>
+    <View testID={testID} style={[styles.statCard, { backgroundColor: color + "12", borderColor: color + "33" }]}>
       <Text style={[styles.statValue, { color }]}>{value}</Text>
       <Text style={styles.statLabel}>{label}</Text>
     </View>

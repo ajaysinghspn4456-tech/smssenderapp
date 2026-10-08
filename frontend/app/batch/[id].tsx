@@ -7,7 +7,7 @@ import { AppState, Linking, Platform, Pressable, ScrollView, Text, View } from "
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ArrowLeft, DownloadSimple, Info, Pause, Play, Prohibit, Stop } from "phosphor-react-native";
 
-import { BatchStatus, controlBatch, exportUrl, getBatch } from "@/src/api";
+import { BatchStatus, controlBatch, exportUrl, getBatch, resendFailed } from "@/src/api";
 import { Button, Card, ConfirmSheet, DemoBanner, StatCard, StatusBadge } from "@/src/components/ui";
 import { useToast } from "@/src/components/toast";
 import { DEMO_MODE, requestSmsPermission } from "@/src/gateway/nativeSms";
@@ -207,6 +207,22 @@ export default function BatchScreen() {
               testID="export-results"
               style={{ marginTop: spacing.md }}
             />
+            {(b?.failed ?? 0) > 0 ? (
+              <Button
+                label={`Resend Failed (${b?.failed})`}
+                variant="secondary"
+                onPress={async () => {
+                  try {
+                    const res = await resendFailed(id!);
+                    router.replace({ pathname: "/batch/[id]", params: { id: res.batch_id } });
+                  } catch (e: any) {
+                    toast(e?.message || "Resend failed", "error");
+                  }
+                }}
+                testID="resend-failed-button"
+                style={{ marginTop: spacing.sm }}
+              />
+            ) : null}
             <Button label="Back to Dashboard" variant="secondary" onPress={() => router.replace("/(tabs)")} testID="batch-done" style={{ marginTop: spacing.sm }} />
           </Card>
         ) : null}

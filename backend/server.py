@@ -82,9 +82,11 @@ def iso(dt: Optional[datetime]) -> Optional[str]:
 class GatewaySettings(BaseModel):
     gateway_id: str
     token: str
-    sending_delay: int = 2          # seconds between messages (configurable)
+    sending_delay: int = 1          # seconds between messages (0 = no artificial delay)
     default_country_code: str = "+91"
     selected_sim: Optional[int] = None
+    chunk_size: int = 0             # auto-pause after this many messages (0 = off)
+    chunk_pause: int = 30           # seconds to pause between chunks
     connected: bool = False
     sim_available: bool = False
     network_connected: bool = False
@@ -96,6 +98,8 @@ class SettingsUpdate(BaseModel):
     sending_delay: Optional[int] = None
     default_country_code: Optional[str] = None
     selected_sim: Optional[int] = None
+    chunk_size: Optional[int] = None
+    chunk_pause: Optional[int] = None
 
 
 class Heartbeat(BaseModel):
@@ -693,6 +697,21 @@ async def resend_batch(batch_id: str, request: Request,
     name = f"Resend · {src_jobs[0].get('batch_id', '')[-6:]}"
     return await _clone_jobs_into_new_batch(
         src_jobs, name, settings.get("sending_delay", 2), request
+    )
+
+
+@api_router.post("/batches/{batch_id}/resend-failed")
+async def resend_failed(batch_id: str, request: Request,
+                        settings: dict = Depends(require_token)):
+    """Resend ONLY the FAILED recipients of a job as a new batch."""
+    src_jobs = []
+    cursor = db.sms_jobs.find({"batch_id": batch_id, "status": "FAILED"}).sort("row", 1)
+    async for j in cursor:
+        src_jobs.append(j)
+    if not src_jobs:
+        raise HTTPException(status_code=400, detail="No failed messages to resend")
+    return await _clone_jobs_into_new_batch(
+        src_jobs, f"Resend failed · {batch_id[-6:]}", settings.get("sending_delay", 2), request
     )
 
 

@@ -14,7 +14,7 @@ export async function getStoredToken(): Promise<string> {
   return (await storage.secureGet(TOKEN_KEY, "")) ?? "";
 }
 
-async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, opts: RequestInit = {}, _retried = false): Promise<T> {
   const token = await getStoredToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -29,11 +29,32 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
   } catch {
     body = text;
   }
+  // Self-heal a diverged/stale gateway token (single-user private app): on a
+  // 403 we re-bootstrap the token once and retry, so the queue never gets
+  // permanently stuck because the device token no longer matches the backend.
+  if (res.status === 403 && !_retried && path !== "/gateway/setup") {
+    const ok = await rebootstrapToken();
+    if (ok) return request<T>(path, opts, true);
+  }
   if (!res.ok) {
     const detail = body?.detail || body || `Request failed (${res.status})`;
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
   return body as T;
+}
+
+async function rebootstrapToken(): Promise<boolean> {
+  try {
+    const res = await fetch(`${BASE}/gateway/setup`, { method: "POST" });
+    const data = await res.json();
+    if (data?.token) {
+      await storage.secureSet(TOKEN_KEY, data.token);
+      return true;
+    }
+  } catch {
+    /* ignore */
+  }
+  return false;
 }
 
 // ---- Gateway setup / settings -------------------------------------------- //
@@ -50,6 +71,8 @@ export type Settings = {
   sending_delay: number;
   default_country_code: string;
   selected_sim: number | null;
+  chunk_size: number;
+  chunk_pause: number;
   connected: boolean;
   sim_available: boolean;
   network_connected: boolean;
@@ -58,7 +81,7 @@ export type Settings = {
 
 export const getSettings = () => request<Settings>("/gateway/settings");
 
-export const updateSettings = (body: Partial<Pick<Settings, "sending_delay" | "default_country_code" | "selected_sim">>) =>
+export const updateSettings = (body: Partial<Pick<Settings, "sending_delay" | "default_country_code" | "selected_sim" | "chunk_size" | "chunk_pause">>) =>
   request<Settings>("/gateway/settings", { method: "PUT", body: JSON.stringify(body) });
 
 export const regenerateToken = () =>
@@ -76,7 +99,7 @@ export const heartbeat = (sim_available: boolean, network_connected: boolean, sm
 // ---- Files ---------------------------------------------------------------- //
 export type UploadResult = { file_id: string; filename: string; sheets: string[] };
 
-export async function uploadFile(asset: { uri: string; name: string; mimeType?: string; file?: any }) {
+export async function uploadFile(asset: { uri: string; name: string; mimeType?: string; file?: any }, _retried = false): Promise<UploadResult> {
   const token = await getStoredToken();
 
   // Web: use a real Blob/File (Expo's fetch requires standards-compliant parts).
@@ -93,6 +116,9 @@ export async function uploadFile(asset: { uri: string; name: string; mimeType?: 
       headers: { "X-Gateway-Token": token },
       body: form,
     });
+    if (res.status === 403 && !_retried && (await rebootstrapToken())) {
+      return uploadFile(asset, true);
+    }
     const body = await res.json().catch(() => null);
     if (!res.ok) throw new Error(body?.detail || "Upload failed");
     return body as UploadResult;
@@ -123,6 +149,9 @@ export async function uploadFile(asset: { uri: string; name: string; mimeType?: 
     parsed = null;
   }
   if (result.status < 200 || result.status >= 300) {
+    if (result.status === 403 && !_retried && (await rebootstrapToken())) {
+      return uploadFile(asset, true);
+    }
     throw new Error(parsed?.detail || `Upload failed (${result.status})`);
   }
   return parsed as UploadResult;
@@ -218,6 +247,9 @@ export const resendMessage = (messageId: string) =>
 
 export const resendBatch = (batchId: string) =>
   request<{ batch_id: string; total: number; delay: number }>(`/batches/${batchId}/resend`, { method: "POST" });
+
+export const resendFailed = (batchId: string) =>
+  request<{ batch_id: string; total: number; delay: number }>(`/batches/${batchId}/resend-failed`, { method: "POST" });
 
 export const nextBatchJobs = (id: string, n = 10) =>
   request<{ jobs: Job[]; control_state: string; delay?: number }>(`/batches/${id}/next-batch?n=${n}`);

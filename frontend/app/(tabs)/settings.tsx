@@ -29,6 +29,7 @@ export default function Settings() {
 
   const [reveal, setReveal] = useState(false);
   const [delay, setDelay] = useState(3);
+  const [chunkSize, setChunkSize] = useState(0);
   const [countryCode, setCountryCode] = useState("+91");
   const [sims, setSims] = useState<SimCard[]>([]);
   const [confirm, setConfirm] = useState<null | "regenerate" | "revoke">(null);
@@ -36,6 +37,7 @@ export default function Settings() {
   useEffect(() => {
     if (settings) {
       setDelay(settings.sending_delay);
+      setChunkSize(settings.chunk_size ?? 0);
       setCountryCode(settings.default_country_code);
     }
   }, [settings]);
@@ -150,7 +152,7 @@ export default function Settings() {
             <Pressable
               style={styles.stepBtn}
               testID="delay-minus"
-              onPress={() => setDelay((d) => Math.max(1, d - 1))}
+              onPress={() => setDelay((d) => Math.max(0, d - 1))}
             >
               <Minus size={18} color={colors.onSurface} weight="bold" />
             </Pressable>
@@ -181,6 +183,24 @@ export default function Settings() {
             />
             {countryCode !== settings.default_country_code ? (
               <Button label="Save" onPress={() => save({ default_country_code: countryCode })} testID="save-cc" />
+            ) : null}
+          </View>
+
+          <View style={styles.divider} />
+          <Text style={styles.rowLabel}>Auto batch pause</Text>
+          <Text style={styles.simNote}>
+            Pause after every N messages to respect Android/carrier SMS limits on big lists. 0 = off.
+          </Text>
+          <View style={styles.stepper}>
+            <Pressable style={styles.stepBtn} testID="chunk-minus" onPress={() => setChunkSize((c) => Math.max(0, c - 25))}>
+              <Minus size={18} color={colors.onSurface} weight="bold" />
+            </Pressable>
+            <Text style={styles.stepValue}>{chunkSize === 0 ? "Off" : chunkSize}</Text>
+            <Pressable style={styles.stepBtn} testID="chunk-plus" onPress={() => setChunkSize((c) => Math.min(500, c + 25))}>
+              <Plus size={18} color={colors.onSurface} weight="bold" />
+            </Pressable>
+            {chunkSize !== (settings.chunk_size ?? 0) ? (
+              <Button label="Save" onPress={() => save({ chunk_size: chunkSize })} testID="save-chunk" style={{ marginLeft: "auto" }} />
             ) : null}
           </View>
 

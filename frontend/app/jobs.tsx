@@ -5,7 +5,7 @@ import { ActivityIndicator, FlatList, Pressable, Text, View } from "react-native
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ArrowClockwise, ArrowLeft, Prohibit } from "phosphor-react-native";
 
-import { BatchListItem, cancelAllJobs, controlBatch, listBatches, resendBatch } from "@/src/api";
+import { BatchListItem, cancelAllJobs, controlBatch, listBatches, resendBatch, resendFailed } from "@/src/api";
 import { Button, Card, ConfirmSheet, EmptyState, StatusBadge } from "@/src/components/ui";
 import { useToast } from "@/src/components/toast";
 import { makeStyles, radius, spacing, useTheme } from "@/src/theme";
@@ -84,6 +84,19 @@ export default function JobsScreen() {
     }
   }
 
+  async function doResendFailed(id: string) {
+    setBusyId(id);
+    try {
+      const res = await resendFailed(id);
+      invalidate();
+      router.push({ pathname: "/batch/[id]", params: { id: res.batch_id } });
+    } catch (e: any) {
+      toast(e?.message || "No failed messages", "error");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   return (
     <View style={styles.screen}>
       <View style={[styles.header, { paddingTop: insets.top + spacing.sm }]}>
@@ -121,6 +134,7 @@ export default function JobsScreen() {
               onOpen={() => router.push({ pathname: "/batch/[id]", params: { id: item.batch_id } })}
               onCancel={() => setCancelId(item.batch_id)}
               onResend={() => doResend(item.batch_id)}
+              onResendFailed={() => doResendFailed(item.batch_id)}
             />
           )}
           ListEmptyComponent={
@@ -159,12 +173,14 @@ function JobCard({
   onOpen,
   onCancel,
   onResend,
+  onResendFailed,
 }: {
   item: BatchListItem;
   busy: boolean;
   onOpen: () => void;
   onCancel: () => void;
   onResend: () => void;
+  onResendFailed: () => void;
 }) {
   const styles = useStyles();
   const { colors } = useTheme();
@@ -206,6 +222,16 @@ function JobCard({
             testID={`resend-batch-${item.batch_id}`}
             style={{ flex: 1 }}
             icon={<ArrowClockwise size={16} color={colors.onSurface} weight="bold" />}
+          />
+        ) : null}
+        {finished && item.failed > 0 ? (
+          <Button
+            label={`Resend Failed (${item.failed})`}
+            variant="secondary"
+            onPress={onResendFailed}
+            loading={busy}
+            testID={`resend-failed-${item.batch_id}`}
+            style={{ flex: 1 }}
           />
         ) : null}
       </View>
