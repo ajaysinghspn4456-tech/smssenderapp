@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 6 confirms the 'batch stuck in RUNNING with Sent=0' bug is FIXED on both backend and web. 9/9 backend tests pass in /app/backend/tests/test_iteration_6_send_flow.py (incl. 5-msg and 50-msg full drain via /next-batch -> /jobs/results, token-self-heal idempotency, no-duplicate replay on bulk + single endpoint, retry transition, cancel semantics, resend-failed 400 on none, settings persistence with sending_delay=0 and chunk_size/chunk_pause, dashboard/history/heartbeat/sample-template regression, 401/403 auth). Primary flow: 50-job batch drained to sent=50 queued=0 sending=0 failed=0 (COMPLETED) with counts identity total == sent+failed+sending+retrying+queued+cancelled holding at every step. Token self-heal: POST /gateway/setup is idempotent (returns same token across repeated calls, never rotates), bad X-Gateway-Token returns 403, and a request with a freshly re-fetched token succeeds. No duplicates: replaying /jobs/results with already-SENT message_ids returns applied=0; single /jobs/{id}/result on a SENT job returns {duplicate_ignored:true,status:SENT}; next-batch returns [] after all SENT. Cancel: 2-sent + 2-pending cancel flips exactly the pending to CANCELLED, keeps SENT, next-batch returns []. Resend-failed: 400 when batch has 0 failed. Frontend web (390x844 mobile viewport, DEMO_MODE): opened /batch/{freshly_created_id} directly — progressed from SENDING to COMPLETED (100%, 5/5 Sent, 0 Failed) in ~6s, complete-card visible with Export Results + Back to Dashboard. Dashboard renders app-logo, 'UPPCL Suchna Seva' + PHONE-001, gateway-status-card (Phone/SIM/SMS Permission/Network rows), action-jobs button, History/Settings tabs. NO wake-lock error on web (previously threw 'wake lock ... not activated'). Only 1 benign console entry: a transient 403 on page load that was self-healed by the api client via POST /gateway/setup retry (expected after token rotation). Native-only features (react-native-background-actions foreground service, native SmsManager multipart) are NOT exercised on web - need an Android build.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_6_send_flow.py",
+    "/app/test_reports/pytest/iteration_6_results.xml"
+  ],
+  "action_items": [
+    "No fixes required. The reported bug (batch stuck in RUNNING with Sent=0, infinite spinner) is resolved: /gateway/setup is idempotent + api client self-heals 403 by re-bootstrapping the token and retrying once; the in-process send loop always runs (foreground service is best-effort keep-alive); 30s per-send timeout prevents hangs; web keep-awake is guarded. Verified end-to-end on backend (9/9) and web UI (fresh batch reaches 100% COMPLETED).",
+    "Follow-up (native-only, cannot be tested on web preview): verify on an Android build that (a) react-native-background-actions keeps the loop alive when the app is backgrounded / screen is locked, (b) real SmsManager multipart sends work and (c) foreground service shows the progress notification. The sender.ts correctly treats the foreground service as a keep-alive only and drives sending from the in-process loop, so a flaky service launch cannot leave the job stuck."
+  ],
+  "critical_code_review_comments": [
+    "api.ts request() correctly re-bootstraps the token once on 403 via POST /gateway/setup and retries; the recursion guard (_retried) is correct so a persistent 403 does not loop infinitely. Same self-heal is applied to uploadFile() for web and native paths.",
+    "gateway/setup is strictly idempotent: when settings exist it returns existing token with created:false. No rotation on setup — verified by two back-to-back calls returning identical token.",
+    "sender.ts always runs processBatch() in-process; hasForegroundService start is wrapped in try/catch and never fatal. SEND_TIMEOUT_MS=30000 wraps each sendOneSms so a hung native send surfaces as a 'Send timed out' error that goes through the normal retry pipeline instead of blocking the whole queue.",
+    "safeActivateKeepAwake / safeDeactivateKeepAwake short-circuit on Platform.OS==='web' which prevents the previous 'wake lock has not been activated' redbox. Confirmed clean console on web.",
+    "Backend _batch_counts always includes cancelled; identity total == sent+failed+sending+retrying+queued+cancelled holds. _batch_display_status returns COMPLETED when pending==0 and sending==0 and sent==total, else CANCELLED/FAILED/RUNNING/PAUSED per control_state.",
+    "next-batch and next both self-heal SENDING jobs older than STUCK_TIMEOUT_SEC (90s) by flipping them to RETRYING with next_attempt_at=now. This is a strong safety net against the original stuck-forever bug.",
+    "report_result and bulk /jobs/results are guarded by {message_id, status:'SENDING'} on the update match, so late/duplicate results on terminal jobs are dropped (applied counter is 0). Verified."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration_6_send_flow.py (new)"
+  ],
+  "success_rate": {"backend": "100% (9/9)", "frontend": "100% - batch COMPLETED 5/5, dashboard renders, no wake-lock error"},
+  "seed_data_creation": "Small CSV uploads during tests (mobiles +9100000001..050). Jobs end in SENT/CANCELLED/RETRYING; safe to leave. 1 fresh batch created from browser test that completed to SENT=5.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Base URL from frontend/.env EXPO_PUBLIC_BACKEND_URL. POST /api/gateway/setup is idempotent — just call it to get the current token. Run: `pytest /app/backend/tests/test_iteration_6_send_flow.py -v -n0`. For web UI test, create a batch via the API then navigate directly to /batch/{id}; DEMO_MODE drives the in-process loop and completes a 5-msg batch in ~6s. Native (Android build) is required for react-native-background-actions, native SMS, real keep-awake wake-lock.",
+  "rca_of_issue": "Original bug (batch stuck RUNNING, sent=0, pending=50): the app's stored X-Gateway-Token had diverged from the backend so every mutating call (including /batches/{id}/next-batch) was 403'd — the send loop never claimed a job, counts never advanced. Fix verified in this iteration: (1) backend POST /gateway/setup returns the CURRENT token idempotently (confirmed in test_setup_idempotent_and_403_on_bad_token); (2) frontend api.ts self-heals on 403 by re-calling /gateway/setup and retrying the original request once; (3) sender.ts always runs the send loop in-process with a 30s per-send timeout; (4) keep-awake is guarded on web so no redbox. End-to-end: fresh batch of 5 completed in ~6s on web (100% COMPLETED, 5 Sent, 0 Failed) and 50-job backend drain completes with correct final counts and display_status=COMPLETED."
+}

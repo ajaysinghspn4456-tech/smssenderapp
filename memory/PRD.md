@@ -54,3 +54,9 @@ system_logs (audit).
 - P1: SIM slot picker polish on multi-SIM devices; per-batch history grouping view.
 - P1: retry-failed action for FAILED jobs.
 - P2: TZ-safe dashboard date comparison; migrate deprecated shadow* props to boxShadow.
+
+## Iteration 6 — Stuck RUNNING fix (Jun 2026)
+- Root cause: app's stored gateway token diverged from backend -> all API calls 403 -> send loop never claimed jobs (stuck RUNNING, Sent=0).
+- Fix: api.ts self-heals token (re-bootstrap via /gateway/setup on 403, retry once); sender loop always in-process (foreground service best-effort), 30s per-send timeout; web keep-awake crash guarded.
+- Verified: 5 & 50 job flows complete (backend 9/9), web batch reaches COMPLETED, no duplicates, cancel/resend OK.
+- Pending: real Android build validation (SIM send, multipart Hindi, background/lock screen, real carrier speed).
