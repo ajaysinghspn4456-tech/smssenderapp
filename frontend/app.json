@@ -47,7 +47,8 @@
       "expo-secure-store",
       "expo-web-browser",
       "expo-status-bar",
-      "expo-sharing"
+      "expo-sharing",
+      "./plugins/withBackgroundActions"
     ],
     "experiments": {
       "typedRoutes": true
