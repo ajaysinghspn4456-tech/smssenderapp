@@ -1,29 +1,18 @@
 import * as FileSystem from "expo-file-system/legacy";
-import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import * as Sharing from "expo-sharing";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { AppState, Linking, Platform, Pressable, ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { ArrowLeft, DownloadSimple, Info, Pause, Play, Stop } from "phosphor-react-native";
+import { ArrowLeft, DownloadSimple, Info, Pause, Play, Prohibit, Stop } from "phosphor-react-native";
 
-import {
-  BatchStatus,
-  exportUrl,
-  getBatch,
-  getSettings,
-  controlBatch,
-  nextJob,
-  reportResult,
-} from "@/src/api";
-import { Button, Card, DemoBanner, StatCard, StatusBadge } from "@/src/components/ui";
+import { BatchStatus, controlBatch, exportUrl, getBatch } from "@/src/api";
+import { Button, Card, ConfirmSheet, DemoBanner, StatCard, StatusBadge } from "@/src/components/ui";
 import { useToast } from "@/src/components/toast";
-import { DEMO_MODE, requestSmsPermission, sendOneSms } from "@/src/gateway/nativeSms";
+import { DEMO_MODE, requestSmsPermission } from "@/src/gateway/nativeSms";
+import { hasForegroundService, isSending, startSending, stopSending } from "@/src/gateway/sender";
 import { makeStyles, radius, spacing, useTheme } from "@/src/theme";
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const KA_TAG = "sms-batch";
 
 export default function BatchScreen() {
   const styles = useStyles();
@@ -34,112 +23,57 @@ export default function BatchScreen() {
   const qc = useQueryClient();
   const { id } = useLocalSearchParams<{ id: string }>();
 
-  const engineRef = useRef(false);
   const [permBlocked, setPermBlocked] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
 
-  const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: getSettings });
   const { data: batch } = useQuery({
     queryKey: ["batch", id],
     queryFn: () => getBatch(id!),
     refetchInterval: 1000,
   });
 
-  const runEngine = useCallback(async () => {
-    if (engineRef.current) return;
-    engineRef.current = true;
-    // keep the screen/CPU awake so Android does not freeze the send loop
-    activateKeepAwakeAsync(KA_TAG).catch(() => {});
+  async function ensurePermissionThenStart() {
     if (!DEMO_MODE) {
       const p = await requestSmsPermission();
       if (p !== "granted") {
         setPermBlocked(p === "blocked");
         toast("SMS permission is required to send", "error");
-        engineRef.current = false;
-        deactivateKeepAwake(KA_TAG);
         return;
       }
     }
     setPermBlocked(false);
-    while (engineRef.current) {
-      let res;
-      try {
-        res = await nextJob(id!);
-      } catch {
-        await sleep(2000); // transient network error — keep trying, don't lose the queue
-        continue;
-      }
-      if (!res.job) {
-        if (res.control_state !== "running") break; // paused / stopped
-        // nothing ready this instant — may be retry backoff; stop only when truly done
-        let b: BatchStatus | undefined;
-        try {
-          b = await getBatch(id!);
-        } catch {
-          await sleep(1500);
-          continue;
-        }
-        qc.setQueryData(["batch", id], b);
-        if (b.pending === 0 && b.sending === 0) break; // all delivered/failed
-        await sleep(1500);
-        continue;
-      }
-      const job = res.job;
-      let result: { status: "sent" | "failed"; error_message?: string; simulated?: boolean };
-      try {
-        const r = await sendOneSms(job.mobile_number, job.message, settings?.selected_sim ?? undefined);
-        result = { status: "sent", simulated: r.simulated };
-      } catch (e: any) {
-        result = { status: "failed", error_message: String(e?.message || e) };
-      }
-      try {
-        await reportResult(job.message_id, result);
-      } catch {
-        // could not report — the backend self-heals this SENDING job into a retry
-      }
-      qc.invalidateQueries({ queryKey: ["batch", id] });
-      await sleep((res.delay ?? settings?.sending_delay ?? 2) * 1000);
-    }
-    engineRef.current = false;
-    deactivateKeepAwake(KA_TAG);
-  }, [id, settings, qc, toast]);
+    startSending(id!, () => qc.invalidateQueries({ queryKey: ["batch", id] }));
+  }
 
-  // auto-start whenever the batch is running and has work left
+  // auto-start when the batch is running and has work left
   useEffect(() => {
     if (
       batch?.control_state === "running" &&
       (batch.pending > 0 || batch.sending > 0) &&
-      !engineRef.current
+      !isSending()
     ) {
-      runEngine();
+      ensurePermissionThenStart();
     }
-  }, [batch?.control_state, batch?.pending, batch?.sending, runEngine]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batch?.control_state, batch?.pending, batch?.sending]);
 
-  // resume the loop when the app returns to the foreground (Android may have frozen it)
+  // resume when app returns to foreground (fallback loop may have been frozen)
   useEffect(() => {
     const sub = AppState.addEventListener("change", (state) => {
-      if (state === "active" && batch?.control_state === "running" && !engineRef.current) {
-        runEngine();
+      if (state === "active" && batch?.control_state === "running" && !isSending()) {
+        ensurePermissionThenStart();
       }
     });
     return () => sub.remove();
-  }, [batch?.control_state, runEngine]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batch?.control_state]);
 
-  useEffect(() => {
-    return () => {
-      engineRef.current = false;
-      deactivateKeepAwake(KA_TAG);
-    };
-  }, []);
-
-  async function control(action: "pause" | "resume" | "stop") {
-    if (action === "pause" || action === "stop") {
-      engineRef.current = false;
-      deactivateKeepAwake(KA_TAG);
-    }
+  async function control(action: "pause" | "resume" | "stop" | "cancel") {
+    if (action !== "resume") await stopSending();
     try {
       const b = await controlBatch(id!, action);
       qc.setQueryData(["batch", id], b);
-      if (action === "resume") runEngine();
+      if (action === "resume") ensurePermissionThenStart();
     } catch (e: any) {
       toast(e?.message || "Action failed", "error");
     }
@@ -167,11 +101,20 @@ export default function BatchScreen() {
   }
 
   const b: BatchStatus | undefined = batch;
-  const done = (b?.sent ?? 0) + (b?.failed ?? 0);
+  const done = (b?.sent ?? 0) + (b?.failed ?? 0) + (b?.cancelled ?? 0);
   const percent = b && b.total > 0 ? Math.round((done / b.total) * 100) : 0;
   const isComplete = b ? b.pending === 0 && b.sending === 0 : false;
+  const isCancelled = b?.control_state === "cancelled";
   const isRunning = b?.control_state === "running" && !isComplete;
   const activity = b?.current_activity;
+
+  const statusLabel = isCancelled
+    ? "CANCELLED"
+    : isComplete
+      ? (b && b.failed > 0 && b.sent === 0 ? "FAILED" : "COMPLETED")
+      : b?.control_state === "paused"
+        ? "PAUSED"
+        : "SENDING";
 
   return (
     <View style={styles.screen}>
@@ -186,10 +129,12 @@ export default function BatchScreen() {
         {DEMO_MODE ? <DemoBanner /> : null}
 
         {isRunning ? (
-          <View style={styles.keepOpen} testID="keep-open-note">
+          <View style={styles.keepOpen} testID="background-note">
             <Info size={16} color={colors.info} weight="fill" />
             <Text style={styles.keepOpenText}>
-              Is screen ko khula rakhein — screen ON rahegi. Android ~30 SMS ke baad ek confirmation puchh sakta hai; usme "Allow / Send" tap karein.
+              {hasForegroundService
+                ? "Sending background me chalega — notification me progress dikhega. App band karne par bhi jaari rahega. Android ~30 SMS ke baad 'Allow' puchh sakta hai."
+                : "Is screen ko khula rakhein — Android ~30 SMS ke baad 'Allow/Send' puchh sakta hai, tab tap karein."}
             </Text>
           </View>
         ) : null}
@@ -197,16 +142,18 @@ export default function BatchScreen() {
         <Card testID="progress-card">
           <View style={styles.progressTop}>
             <Text style={styles.percent}>{percent}%</Text>
-            <Text style={styles.progressLabel}>
-              {done} / {b?.total ?? 0} {isComplete ? "· completed" : b?.control_state === "paused" ? "· paused" : "· sending"}
-            </Text>
+            <StatusBadge
+              testID="batch-status-badge"
+              kind={isCancelled ? "muted" : isComplete ? "success" : "warning"}
+              label={statusLabel}
+            />
           </View>
+          <Text style={styles.progressLabel}>{done} / {b?.total ?? 0}</Text>
           <View style={styles.track}>
             <View style={[styles.fill, { width: `${percent}%` }]} />
           </View>
         </Card>
 
-        {/* exact real-time counts (sum always equals total) */}
         <View style={styles.grid}>
           <StatCard testID="count-sent" label="Sent" value={b?.sent ?? 0} kind="success" />
           <StatCard testID="count-failed" label="Failed" value={b?.failed ?? 0} kind="error" />
@@ -216,8 +163,12 @@ export default function BatchScreen() {
           <StatCard testID="count-retrying" label="Retrying" value={b?.retrying ?? 0} kind="warning" />
           <StatCard testID="count-sending" label="Sending" value={b?.sending ?? 0} />
         </View>
+        {(b?.cancelled ?? 0) > 0 ? (
+          <View style={styles.grid}>
+            <StatCard testID="count-cancelled" label="Cancelled" value={b?.cancelled ?? 0} kind="muted" />
+          </View>
+        ) : null}
 
-        {/* current activity */}
         <Card testID="current-activity">
           <Text style={styles.activityHeading}>Current activity</Text>
           {activity ? (
@@ -230,7 +181,9 @@ export default function BatchScreen() {
               </View>
             </>
           ) : (
-            <Text style={styles.idleText}>{isComplete ? "Finished" : isRunning ? "Preparing next message..." : "Paused"}</Text>
+            <Text style={styles.idleText}>
+              {isCancelled ? "Cancelled" : isComplete ? "Finished" : isRunning ? "Preparing next message..." : "Paused"}
+            </Text>
           )}
         </Card>
 
@@ -241,11 +194,11 @@ export default function BatchScreen() {
           </Card>
         ) : null}
 
-        {isComplete ? (
+        {isComplete || isCancelled ? (
           <Card testID="complete-card">
-            <Text style={styles.completeTitle}>Sending complete</Text>
+            <Text style={styles.completeTitle}>{isCancelled ? "Job cancelled" : "Sending complete"}</Text>
             <Text style={styles.completeSub}>
-              {b?.sent ?? 0} sent · {b?.failed ?? 0} failed
+              {b?.sent ?? 0} sent · {b?.failed ?? 0} failed{(b?.cancelled ?? 0) > 0 ? ` · ${b?.cancelled} cancelled` : ""}
             </Text>
             <Button
               label="Export Results"
@@ -259,7 +212,7 @@ export default function BatchScreen() {
         ) : null}
       </ScrollView>
 
-      {!isComplete ? (
+      {!isComplete && !isCancelled ? (
         <View style={[styles.controls, { paddingBottom: insets.bottom + spacing.md }]}>
           {isRunning ? (
             <Button
@@ -280,15 +233,29 @@ export default function BatchScreen() {
             />
           )}
           <Button
-            label="Stop"
+            label="Cancel"
             variant="danger"
-            icon={<Stop size={18} color={colors.onError} weight="fill" />}
-            onPress={() => control("stop")}
-            testID="stop-button"
+            icon={<Prohibit size={18} color={colors.onError} weight="fill" />}
+            onPress={() => setConfirmCancel(true)}
+            testID="cancel-batch-button"
             style={{ flex: 1 }}
           />
         </View>
       ) : null}
+
+      <ConfirmSheet
+        visible={confirmCancel}
+        title="Cancel this job?"
+        message={`${b?.pending ?? 0} pending message(s) will be cancelled. Already sent messages stay sent and are never resent.`}
+        confirmLabel="Cancel Job"
+        cancelLabel="Keep Sending"
+        danger
+        onConfirm={() => {
+          setConfirmCancel(false);
+          control("cancel");
+        }}
+        onCancel={() => setConfirmCancel(false)}
+      />
     </View>
   );
 }
@@ -325,9 +292,9 @@ const useStyles = makeStyles((colors) => ({
     borderColor: colors.border,
   },
   keepOpenText: { flex: 1, fontSize: 12.5, color: colors.onSurfaceSecondary, lineHeight: 17 },
-  progressTop: { flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", marginBottom: spacing.md },
+  progressTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   percent: { fontSize: 40, fontWeight: "900", color: colors.onSurface },
-  progressLabel: { fontSize: 13, color: colors.muted, fontWeight: "600" },
+  progressLabel: { fontSize: 13, color: colors.muted, fontWeight: "600", marginBottom: spacing.sm },
   track: { height: 12, borderRadius: radius.pill, backgroundColor: colors.surfaceTertiary, overflow: "hidden" },
   fill: { height: 12, borderRadius: radius.pill, backgroundColor: colors.success },
   grid: { flexDirection: "row", gap: spacing.md },

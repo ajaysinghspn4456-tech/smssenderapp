@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
+import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { PaperPlaneTilt, TestTube } from "phosphor-react-native";
+import { ListChecks, PaperPlaneTilt, TestTube } from "phosphor-react-native";
 
 import { getDashboard } from "@/src/api";
 import { DemoBanner, Button, Card, StatCard, StatusBadge } from "@/src/components/ui";
@@ -50,8 +51,14 @@ export default function Dashboard() {
       refreshControl={<RefreshControl refreshing={isRefetching} onRefresh={refetch} tintColor={colors.brandPrimary} />}
     >
       <View style={styles.headerRow}>
-        <View>
-          <Text style={styles.hello}>Private SMS Gateway</Text>
+        <Image
+          source={require("../../assets/images/uppcl-logo-crop.png")}
+          style={styles.logo}
+          contentFit="contain"
+          testID="app-logo"
+        />
+        <View style={{ flex: 1 }}>
+          <Text style={styles.hello}>UPPCL Suchna Seva</Text>
           <Text style={styles.gatewayId}>{data?.gateway_id ?? "PHONE-001"}</Text>
         </View>
       </View>
@@ -136,6 +143,13 @@ export default function Dashboard() {
               onPress={() => router.push("/test-sms")}
               testID="action-test-sms"
             />
+            <Button
+              label="Sending Jobs"
+              variant="secondary"
+              icon={<ListChecks size={18} color={colors.onSurface} weight="fill" />}
+              onPress={() => router.push("/jobs")}
+              testID="action-jobs"
+            />
             <View style={styles.actionRow}>
               <Button label="History" variant="secondary" onPress={() => router.push("/(tabs)/history")} testID="action-history" style={{ flex: 1 }} />
               <Button label="Settings" variant="secondary" onPress={() => router.push("/(tabs)/settings")} testID="action-settings" style={{ flex: 1 }} />
@@ -149,7 +163,8 @@ export default function Dashboard() {
 
 const useStyles = makeStyles((colors) => ({
   screen: { flex: 1, backgroundColor: colors.surface },
-  headerRow: { paddingHorizontal: spacing.lg, paddingBottom: spacing.md },
+  headerRow: { flexDirection: "row", alignItems: "center", gap: spacing.md, paddingHorizontal: spacing.lg, paddingBottom: spacing.md },
+  logo: { width: 52, height: 52, borderRadius: 12 },
   hello: { fontSize: 24, fontWeight: "800", color: colors.onSurface },
   gatewayId: { fontSize: 13, color: colors.muted, marginTop: 2, fontWeight: "600" },
   loading: { padding: spacing["2xl"], alignItems: "center", gap: spacing.sm },

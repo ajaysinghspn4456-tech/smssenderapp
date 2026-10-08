@@ -1,0 +1,45 @@
+{
+  "summary": "Iteration 5 verifies the 5 new features: RESEND (per-message + per-batch), queue-level CANCEL (single + cancel-all), fast bulk-claim (next-batch) + bulk results, LIST jobs with display_status, and the UPPCL logo/UI. Added /app/backend/tests/test_resend_cancel_bulk.py (10 focused tests). Results: 10/10 PASS on new feature tests; 33/33 PASS on regression suites (test_sms_gateway.py + test_upload_formats.py). Highlights verified: (a) POST /api/history/{msg}/resend creates a NEW batch of 1 QUEUED job with same mobile+message but new message_id and new SMS-YYMMDD-NNNNNN job_id; original SENT job unchanged (status + sent_at preserved); unknown message_id -> 404. (b) POST /api/batches/{id}/resend clones all 3 recipients into a brand new batch (new batch_id, total=3, 3 QUEUED), originals untouched (still queued=3,total=3 on source). (c) POST /api/batches/{id}/control cancel: SENT job stays SENT; 3 pending jobs flip to CANCELLED; control_state='cancelled'; subsequent GET /next AND /next-batch return no jobs (queue-level stop). Counts identity total == sent+failed+sending+retrying+queued+cancelled holds (1 sent + 3 cancelled = 4 total). (d) POST /api/batches/cancel-all cancels all running/paused batches, returns {cancelled_batches>=2}, zeroes queued/sending/retrying on each. (e) GET /api/batches returns items with name, display_status in {RUNNING,PAUSED,COMPLETED,CANCELLED,FAILED}, and all counts including cancelled; identity holds per row. (f) GET /api/batches/{id}/next-batch?n=4 atomically claims 4 jobs (all SENDING, attempts=1); POST /api/jobs/results applies many results in one call -> 3 SENT + 1 RETRYING (attempts<max); applied counter correct. (g) Idempotency: replaying bulk results for an already-SENT job returns applied=0 and status stays SENT (no duplicate re-send). (h) Auth 403 on missing/invalid X-Gateway-Token for /api/batches. Frontend web (DEMO_MODE, mobile viewport 390x844): Dashboard renders UPPCL logo (data-testid=app-logo), title 'UPPCL Suchna Seva', PHONE-001 subtitle, Gateway status card with READY badge and all 4 rows (Phone/SIM/SMS Permission/Network), Today's SMS Sent counter (15), Pending (7), Failed (0), Last Activity. The new 'Sending Jobs' button (action-jobs) opens /jobs which lists 22 batches with per-job Cancel buttons (5 on RUNNING batches), per-job Resend buttons (18 on COMPLETED/FAILED batches), and a top 'Cancel All Pending Jobs (4)' button (cancel-all-button). Tapping a job opens batch screen with progress-card, SENDING badge, counts (queued/retrying/sending visible; cancelled shown when >0), current-activity card and Pause+Cancel action buttons. History tab lists 54 items with 15 Resend buttons on SENT/FAILED items. All 4 tabs reachable, 0 console errors. Native-only features (Android foreground service / react-native-background-actions / native multipart SMS / keep-awake) are NOT testable on web preview and were NOT exercised; the frontend web sender.ts falls back to an in-process DEMO_MODE loop which is confirmed working.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_resend_cancel_bulk.py",
+    "/app/test_reports/pytest/iteration_5_results.xml",
+    "/app/test_reports/pytest/iteration_5_regression.xml"
+  ],
+  "action_items": [
+    "No action items. All 5 requested features (RESEND single + batch, CANCEL single + CANCEL ALL, fast bulk send via next-batch + /jobs/results, LIST with display_status, UPPCL logo + Jobs button) are verified end-to-end on backend and web UI.",
+    "Native-only follow-ups (unreachable on web preview, must be tested on an Android build): verify react-native-background-actions keeps the loop alive when the app is backgrounded / locked, and that native multipart SmsManager is used for long SMS."
+  ],
+  "critical_code_review_comments": [
+    "POST /api/batches/{id}/control with action='cancel' correctly implements queue-level cancellation: single update_many flips every QUEUED/PENDING/RETRYING/SENDING job to CANCELLED. Already SENT/FAILED stay untouched. control_state goes to 'cancelled' so next-batch/next return early with no jobs.",
+    "POST /api/batches/cancel-all iterates batches in control_state in ['running','paused'] and applies the same CANCELLED update_many. Returns {cancelled_batches} which only counts batches where modified_count>0 - a reasonable, user-visible metric.",
+    "/api/history/{message_id}/resend and /api/batches/{batch_id}/resend both use _clone_jobs_into_new_batch which inserts a brand new batch doc and brand new jobs with fresh SMS-YYMMDD-NNNNNN job_ids and MSG-{batchid[-6:]}-NNNNN message_ids. The source doc is never updated -> originals are strictly immutable, as required.",
+    "/api/batches/{id}/next-batch is the correct atomic batch-claim: loops find_one_and_update up to N times with {status in [QUEUED,PENDING,RETRYING]} + next_attempt_at gate; each claim bumps attempts and sets SENDING. Self-heals stuck SENDING>90s via a prior update_many. Behaves identically to /next in semantics - no divergence.",
+    "/api/jobs/results applies results sequentially inside one call. Each update is guarded by {message_id, status:'SENDING'} so a late/duplicate result on an already-terminal job is dropped (applied counter does not increase). This is the duplicate-prevention guarantee verified by tests.",
+    "_batch_display_status priority: if all delivered (pending==0, sending==0) -> COMPLETED/FAILED/CANCELLED based on counts; else RUNNING/PAUSED/CANCELLED by control_state. Minor edge: a batch with control_state='stopped' falls through to RUNNING in the display mapping - but 'stop' isn't exposed from the Jobs screen UI, so it is not user-visible.",
+    "Counts identity now includes cancelled: total == sent+failed+sending+retrying+queued+cancelled. Verified at every transition in TestCancelOne.",
+    "cancel-all uses modified_count>0 as the increment guard, so idempotent repeat calls return cancelled_batches=0 (no double counting). Good.",
+    "Resend endpoints keep audit logging via audit('resend', ...). Good."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_resend_cancel_bulk.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% on new features (10/10 test_resend_cancel_bulk.py) and 100% on active regression (33/33 across test_sms_gateway.py + test_upload_formats.py).",
+    "frontend": "100% - Dashboard renders UPPCL logo + title + Gateway status card + 'Sending Jobs' button; Jobs screen shows Cancel All + per-job Cancel + per-job Resend; Batch screen shows queued/retrying/cancelled counts; History shows Resend buttons on SENT/FAILED. 0 console errors."
+  },
+  "seed_data_creation": "Created several small xlsx test batches (mobiles 9100000001..60) for RESEND/CANCEL/next-batch tests. Jobs end in SENT/CANCELLED/RETRYING states; safe to leave in sms_jobs. Note: TestCancelAll calls /batches/cancel-all which cancels every running/paused batch in the DB - so when this suite runs it will cancel any other test's running batches. The test file is written to run with -n0 (sequential) to avoid that affecting sibling tests in the same file.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Base URL from frontend/.env EXPO_PUBLIC_BACKEND_URL. Token via POST /api/gateway/setup (idempotent; may rotate - re-fetch). Header X-Gateway-Token on every mutation. Run new feature tests sequentially: `pytest /app/backend/tests/test_resend_cancel_bulk.py -v -n0 --junitxml=/app/test_reports/pytest/iteration_X_results.xml` (TestCancelAll calls /batches/cancel-all which affects all other running batches in the DB -> MUST use -n0 to serialize). Full regression: `pytest /app/backend/tests/test_sms_gateway.py /app/backend/tests/test_upload_formats.py /app/backend/tests/test_new_queue_features.py /app/backend/tests/test_resend_cancel_bulk.py -v -n0`. For frontend, use mobile viewport 390x844; relevant testIDs: app-logo, gateway-status-card, action-jobs, cancel-all-button, job-{batch_id}, cancel-{batch_id}, resend-batch-{batch_id}, resend-{message_id}, count-cancelled, batch-status-badge.",
+  "rca_of_issue": "No bugs found. All 5 requested features implemented correctly end-to-end: RESEND is strictly non-mutating (clones), CANCEL/CANCEL-ALL are queue-level (DB status flipped + control_state updated so claims return nothing), bulk path (/next-batch + /jobs/results) matches /next semantics incl. retry cap and idempotency, LIST includes display_status + cancelled count, and the UI exposes all of this with correct testIDs. Native-only Android foreground-service background sending remains unverifiable on web preview - must be tested in an Android build before shipping."
+}

@@ -26,6 +26,7 @@ export default function RootLayout() {
                   <Stack.Screen name="(tabs)" />
                   <Stack.Screen name="preview" />
                   <Stack.Screen name="batch/[id]" />
+                  <Stack.Screen name="jobs" />
                   <Stack.Screen name="test-sms" options={{ presentation: "modal" }} />
                 </Stack>
               </ToastProvider>

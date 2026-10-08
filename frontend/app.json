@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "frontend",
+    "name": "UPPCL Suchna Seva",
     "slug": "frontend",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -14,12 +14,16 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#111827"
+        "backgroundColor": "#FFFFFF"
       },
       "package": "com.emergent.bulksmssender.yc8l4d",
       "permissions": [
         "android.permission.SEND_SMS",
-        "android.permission.READ_PHONE_STATE"
+        "android.permission.READ_PHONE_STATE",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.WAKE_LOCK"
       ]
     },
     "web": {
@@ -33,9 +37,9 @@
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-image.png",
-          "imageWidth": 200,
+          "imageWidth": 220,
           "resizeMode": "contain",
-          "backgroundColor": "#000000"
+          "backgroundColor": "#E9EAEC"
         }
       ],
       "expo-font",

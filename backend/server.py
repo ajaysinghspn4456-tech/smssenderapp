@@ -138,6 +138,17 @@ class JobResult(BaseModel):
     simulated: bool = False
 
 
+class BulkResultItem(BaseModel):
+    message_id: str
+    status: str            # sent | failed
+    error_message: Optional[str] = None
+    simulated: bool = False
+
+
+class BulkResults(BaseModel):
+    results: List[BulkResultItem]
+
+
 class TestSmsRequest(BaseModel):
     mobile: str
     message: str
@@ -481,7 +492,7 @@ async def create_batch(body: CreateBatchRequest, request: Request,
 
 
 async def _batch_counts(batch_id: str) -> dict:
-    raw = {"QUEUED": 0, "PENDING": 0, "SENDING": 0, "SENT": 0, "FAILED": 0, "RETRYING": 0}
+    raw = {"QUEUED": 0, "PENDING": 0, "SENDING": 0, "SENT": 0, "FAILED": 0, "RETRYING": 0, "CANCELLED": 0}
     cursor = db.sms_jobs.aggregate([
         {"$match": {"batch_id": batch_id}},
         {"$group": {"_id": "$status", "n": {"$sum": 1}}},
@@ -497,6 +508,7 @@ async def _batch_counts(batch_id: str) -> dict:
         "sent": raw["SENT"],
         "failed": raw["FAILED"],
         "retrying": raw["RETRYING"],
+        "cancelled": raw["CANCELLED"],
         # backward-compatible: everything still waiting to be delivered
         "pending": queued + raw["RETRYING"],
     }
@@ -540,22 +552,148 @@ async def get_batch(batch_id: str, settings: dict = Depends(require_token)):
 @api_router.post("/batches/{batch_id}/control")
 async def control_batch(batch_id: str, body: ControlRequest, request: Request,
                         settings: dict = Depends(require_token)):
-    if body.action not in ("pause", "resume", "stop"):
+    if body.action not in ("pause", "resume", "stop", "cancel"):
         raise HTTPException(status_code=400, detail="Invalid action")
-    state = {"pause": "paused", "resume": "running", "stop": "stopped"}[body.action]
+    state = {"pause": "paused", "resume": "running", "stop": "stopped", "cancel": "cancelled"}[body.action]
     try:
         oid = ObjectId(batch_id)
     except Exception:
         raise HTTPException(status_code=404, detail="Batch not found")
     await db.batches.update_one({"_id": oid}, {"$set": {"control_state": state}})
-    # if a message was mid-SENDING when paused/stopped, put it back so it is not lost
-    if state in ("paused", "stopped"):
+    if body.action == "cancel":
+        # Queue-level cancellation: every job not yet delivered becomes CANCELLED so
+        # the worker will never pick it. Already SENT/FAILED jobs are left untouched.
+        await db.sms_jobs.update_many(
+            {"batch_id": batch_id, "status": {"$in": ["QUEUED", "PENDING", "RETRYING", "SENDING"]}},
+            {"$set": {"status": "CANCELLED", "next_attempt_at": None, "updated_at": iso(now_utc())}},
+        )
+    elif state in ("paused", "stopped"):
+        # if a message was mid-SENDING, put it back so it is not lost
         await db.sms_jobs.update_many(
             {"batch_id": batch_id, "status": "SENDING"},
             {"$set": {"status": "QUEUED", "next_attempt_at": None, "updated_at": iso(now_utc())}},
         )
     await audit("batch_control", {"batch_id": batch_id, "action": body.action}, request)
     return await get_batch(batch_id, settings)
+
+
+@api_router.post("/batches/cancel-all")
+async def cancel_all(request: Request, settings: dict = Depends(require_token)):
+    """Cancel every batch that still has work (running/paused). Already sent
+    messages stay sent; nothing is resent."""
+    active = db.batches.find({"control_state": {"$in": ["running", "paused"]}})
+    cancelled_batches = 0
+    async for batch in active:
+        bid = str(batch["_id"])
+        res = await db.sms_jobs.update_many(
+            {"batch_id": bid, "status": {"$in": ["QUEUED", "PENDING", "RETRYING", "SENDING"]}},
+            {"$set": {"status": "CANCELLED", "next_attempt_at": None, "updated_at": iso(now_utc())}},
+        )
+        await db.batches.update_one({"_id": batch["_id"]}, {"$set": {"control_state": "cancelled"}})
+        if res.modified_count:
+            cancelled_batches += 1
+    await audit("cancel_all", {"batches": cancelled_batches}, request)
+    return {"cancelled_batches": cancelled_batches}
+
+
+def _batch_display_status(control_state: str, counts: dict) -> str:
+    if counts["total"] > 0 and counts["pending"] == 0 and counts["sending"] == 0:
+        if control_state == "cancelled" and counts["cancelled"] > 0:
+            return "CANCELLED"
+        if counts["failed"] > 0 and counts["sent"] == 0:
+            return "FAILED"
+        if counts["cancelled"] > 0 and counts["sent"] < counts["total"]:
+            return "CANCELLED"
+        return "COMPLETED"
+    if control_state == "cancelled":
+        return "CANCELLED"
+    if control_state == "paused":
+        return "PAUSED"
+    return "RUNNING"
+
+
+@api_router.get("/batches")
+async def list_batches(settings: dict = Depends(require_token)):
+    """Lists batches (newest first) with live counts — powers the Jobs screen."""
+    items = []
+    cursor = db.batches.find().sort("created_at", -1).limit(100)
+    async for batch in cursor:
+        bid = str(batch["_id"])
+        counts = await _batch_counts(bid)
+        items.append({
+            "batch_id": bid,
+            "name": batch.get("filename", "Job"),
+            "control_state": batch.get("control_state", "running"),
+            "display_status": _batch_display_status(batch.get("control_state", "running"), counts),
+            "created_at": batch.get("created_at"),
+            **counts,
+        })
+    return {"items": items}
+
+
+async def _clone_jobs_into_new_batch(source_jobs: List[dict], name: str,
+                                      delay: int, request: Request) -> dict:
+    batch = {
+        "filename": name,
+        "sheet": "RESEND",
+        "control_state": "running",
+        "total": len(source_jobs),
+        "delay": delay,
+        "created_at": iso(now_utc()),
+    }
+    batch_result = await db.batches.insert_one(batch)
+    batch_id = str(batch_result.inserted_id)
+    jobs = []
+    for i, s in enumerate(source_jobs):
+        jobs.append({
+            "message_id": f"MSG-{batch_id[-6:]}-{(i + 1):05d}",
+            "job_id": await next_job_id(),
+            "batch_id": batch_id,
+            "row": i + 1,
+            "mobile_number": s["mobile_number"],
+            "message": s["message"],
+            "status": "QUEUED",
+            "attempts": 0,
+            "max_attempts": MAX_ATTEMPTS,
+            "next_attempt_at": None,
+            "error_message": None,
+            "simulated": False,
+            "is_test": False,
+            "created_at": iso(now_utc()),
+            "updated_at": iso(now_utc()),
+        })
+    await db.sms_jobs.insert_many(jobs)
+    await audit("resend", {"batch_id": batch_id, "total": len(jobs)}, request)
+    return {"batch_id": batch_id, "total": len(jobs), "delay": delay}
+
+
+@api_router.post("/history/{message_id}/resend")
+async def resend_message(message_id: str, request: Request,
+                         settings: dict = Depends(require_token)):
+    """Resend a single historical message as a brand new job. The original
+    history record is never modified."""
+    src = await db.sms_jobs.find_one({"message_id": message_id})
+    if not src:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return await _clone_jobs_into_new_batch(
+        [src], f"Resend · {src['mobile_number']}", settings.get("sending_delay", 2), request
+    )
+
+
+@api_router.post("/batches/{batch_id}/resend")
+async def resend_batch(batch_id: str, request: Request,
+                       settings: dict = Depends(require_token)):
+    """Resend an entire original job to all its recipients as a new batch."""
+    src_jobs = []
+    cursor = db.sms_jobs.find({"batch_id": batch_id}).sort("row", 1)
+    async for j in cursor:
+        src_jobs.append(j)
+    if not src_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    name = f"Resend · {src_jobs[0].get('batch_id', '')[-6:]}"
+    return await _clone_jobs_into_new_batch(
+        src_jobs, name, settings.get("sending_delay", 2), request
+    )
 
 
 @api_router.get("/batches/{batch_id}/next")
@@ -652,6 +790,77 @@ async def report_result(message_id: str, body: JobResult, request: Request,
                                "simulated": body.simulated}, request)
     return {"message_id": message_id, "status": new_status,
             "mobile_number": current["mobile_number"], "timestamp": iso(now_utc())}
+
+
+@api_router.get("/batches/{batch_id}/next-batch")
+async def next_batch(batch_id: str, n: int = 10, settings: dict = Depends(require_token)):
+    """Claim up to N deliverable jobs in one round-trip (fewer HTTP/DB calls =
+    much faster bulk sending). Self-heals stuck SENDING jobs first."""
+    n = max(1, min(n, 50))
+    try:
+        batch = await db.batches.find_one({"_id": ObjectId(batch_id)})
+    except Exception:
+        batch = None
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    stuck_before = iso(now_utc() - timedelta(seconds=STUCK_TIMEOUT_SEC))
+    await db.sms_jobs.update_many(
+        {"batch_id": batch_id, "status": "SENDING", "updated_at": {"$lt": stuck_before}},
+        {"$set": {"status": "RETRYING", "next_attempt_at": iso(now_utc()), "updated_at": iso(now_utc())}},
+    )
+
+    if batch["control_state"] != "running":
+        return {"jobs": [], "control_state": batch["control_state"]}
+
+    claimed = []
+    now_iso = iso(now_utc())
+    for _ in range(n):
+        job = await db.sms_jobs.find_one_and_update(
+            {
+                "batch_id": batch_id,
+                "status": {"$in": ["QUEUED", "PENDING", "RETRYING"]},
+                "$or": [{"next_attempt_at": None}, {"next_attempt_at": {"$lte": now_iso}}],
+            },
+            {"$set": {"status": "SENDING", "updated_at": now_iso}, "$inc": {"attempts": 1}},
+            sort=[("row", 1)],
+            return_document=ReturnDocument.AFTER,
+        )
+        if not job:
+            break
+        job.pop("_id", None)
+        claimed.append(job)
+    return {"jobs": claimed, "control_state": "running", "delay": batch.get("delay", 2)}
+
+
+@api_router.post("/jobs/results")
+async def report_results_bulk(body: BulkResults, request: Request,
+                              settings: dict = Depends(require_token)):
+    """Report many send results in one call (one DB write loop, one audit)."""
+    applied = 0
+    for item in body.results:
+        current = await db.sms_jobs.find_one({"message_id": item.message_id})
+        if not current or current["status"] != "SENDING":
+            continue
+        if item.status == "sent":
+            update = {"status": "SENT", "error_message": None, "simulated": item.simulated,
+                      "sent_at": iso(now_utc()), "updated_at": iso(now_utc())}
+        else:
+            attempts = current.get("attempts", 1)
+            max_a = current.get("max_attempts", MAX_ATTEMPTS)
+            if attempts < max_a:
+                update = {"status": "RETRYING", "error_message": item.error_message,
+                          "simulated": item.simulated,
+                          "next_attempt_at": iso(now_utc() + timedelta(seconds=retry_backoff(attempts))),
+                          "updated_at": iso(now_utc())}
+            else:
+                update = {"status": "FAILED", "error_message": item.error_message,
+                          "simulated": item.simulated, "updated_at": iso(now_utc())}
+        res = await db.sms_jobs.update_one(
+            {"message_id": item.message_id, "status": "SENDING"}, {"$set": update}
+        )
+        applied += res.modified_count
+    return {"applied": applied}
 
 
 # --------------------------------------------------------------------------- #

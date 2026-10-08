@@ -1,11 +1,13 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRouter } from "expo-router";
 import { useState } from "react";
 import { ActivityIndicator, FlatList, Image, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { MagnifyingGlass } from "phosphor-react-native";
+import { ArrowClockwise, MagnifyingGlass } from "phosphor-react-native";
 
-import { HistoryItem, getHistory } from "@/src/api";
-import { EmptyState, StatusBadge } from "@/src/components/ui";
+import { HistoryItem, getHistory, resendMessage } from "@/src/api";
+import { Button, ConfirmSheet, EmptyState, StatusBadge } from "@/src/components/ui";
+import { useToast } from "@/src/components/toast";
 import { makeStyles, radius, spacing, useTheme } from "@/src/theme";
 
 const FILTERS = ["All", "Sent", "Failed", "Pending"] as const;
@@ -21,14 +23,34 @@ export default function History() {
   const styles = useStyles();
   const insets = useSafeAreaInsets();
   const { colors } = useTheme();
+  const router = useRouter();
+  const toast = useToast();
+  const qc = useQueryClient();
   const [filter, setFilter] = useState<string>("All");
   const [search, setSearch] = useState("");
+  const [resendItem, setResendItem] = useState<HistoryItem | null>(null);
+  const [resending, setResending] = useState(false);
 
   const { data, isLoading, refetch, isRefetching } = useQuery({
     queryKey: ["history", filter, search],
     queryFn: () => getHistory(filter.toLowerCase(), search),
     refetchInterval: 6000,
   });
+
+  async function doResend() {
+    if (!resendItem) return;
+    setResending(true);
+    try {
+      const res = await resendMessage(resendItem.message_id);
+      setResendItem(null);
+      qc.invalidateQueries({ queryKey: ["batches"] });
+      router.push({ pathname: "/batch/[id]", params: { id: res.batch_id } });
+    } catch (e: any) {
+      toast(e?.message || "Resend failed", "error");
+    } finally {
+      setResending(false);
+    }
+  }
 
   return (
     <View style={styles.screen}>
@@ -79,7 +101,7 @@ export default function History() {
           contentContainerStyle={styles.listContent}
           onRefresh={refetch}
           refreshing={isRefetching}
-          renderItem={({ item }) => <HistoryCard item={item} />}
+          renderItem={({ item }) => <HistoryCard item={item} onResend={() => setResendItem(item)} />}
           ListEmptyComponent={
             <View style={styles.emptyWrap}>
               <Image
@@ -91,14 +113,25 @@ export default function History() {
           }
         />
       )}
+
+      <ConfirmSheet
+        visible={resendItem !== null}
+        title="Resend this SMS?"
+        message={`A new sending job will be created for ${resendItem?.mobile_number ?? ""}. The original history record stays unchanged.`}
+        confirmLabel={resending ? "Creating..." : "Resend"}
+        onConfirm={doResend}
+        onCancel={() => setResendItem(null)}
+      />
     </View>
   );
 }
 
-function HistoryCard({ item }: { item: HistoryItem }) {
+function HistoryCard({ item, onResend }: { item: HistoryItem; onResend: () => void }) {
   const styles = useStyles();
+  const { colors } = useTheme();
   const b = statusBadge(item.status);
   const time = item.updated_at ? new Date(item.updated_at).toLocaleString() : "";
+  const canResend = item.status === "SENT" || item.status === "FAILED";
   return (
     <View style={styles.card} testID={`history-item-${item.message_id}`}>
       <View style={styles.cardTop}>
@@ -109,11 +142,21 @@ function HistoryCard({ item }: { item: HistoryItem }) {
         {item.message}
       </Text>
       <View style={styles.cardBottom}>
-        <Text style={styles.meta}>{item.message_id}</Text>
+        <Text style={styles.meta}>{item.job_id || item.message_id}</Text>
         <Text style={styles.meta}>{time}</Text>
       </View>
       {item.error_message ? <Text style={styles.error}>{item.error_message}</Text> : null}
       {item.simulated ? <Text style={styles.sim}>simulated (demo)</Text> : null}
+      {canResend ? (
+        <Button
+          label="Resend"
+          variant="secondary"
+          onPress={onResend}
+          testID={`resend-${item.message_id}`}
+          icon={<ArrowClockwise size={16} color={colors.onSurface} weight="bold" />}
+          style={{ marginTop: spacing.xs }}
+        />
+      ) : null}
     </View>
   );
 }

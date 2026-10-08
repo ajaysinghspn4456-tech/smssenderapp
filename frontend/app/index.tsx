@@ -1,7 +1,7 @@
+import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
-import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
-import { ChatCircleDots } from "phosphor-react-native";
+import { ActivityIndicator, Text, View } from "react-native";
 
 import { setupGateway, getStoredToken } from "@/src/api";
 import { Button } from "@/src/components/ui";
@@ -43,10 +43,12 @@ export default function Index() {
 
   return (
     <View style={styles.container} testID="bootstrap-screen">
-      <View style={styles.logo}>
-        <ChatCircleDots size={40} color={colors.onBrandPrimary} weight="fill" />
-      </View>
-      <Text style={styles.title}>Private SMS Gateway</Text>
+      <Image
+        source={require("../assets/images/uppcl-logo-crop.png")}
+        style={styles.logo}
+        contentFit="contain"
+      />
+      <Text style={styles.title}>UPPCL Suchna Seva</Text>
       {error ? (
         <>
           <Text style={styles.error}>{error}</Text>
@@ -61,15 +63,7 @@ export default function Index() {
 
 const useStyles = makeStyles((colors) => ({
   container: { flex: 1, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center", padding: 32 },
-  logo: {
-    width: 76,
-    height: 76,
-    borderRadius: 20,
-    backgroundColor: colors.brandPrimary,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 20,
-  },
+  logo: { width: 180, height: 150, marginBottom: 12 },
   title: { fontSize: 22, fontWeight: "800", color: colors.onSurface },
   error: { fontSize: 14, color: colors.error, textAlign: "center", marginTop: 16, lineHeight: 20 },
 }));

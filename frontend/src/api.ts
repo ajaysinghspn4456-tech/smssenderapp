@@ -193,13 +193,38 @@ export type BatchStatus = {
   sent: number;
   failed: number;
   retrying: number;
+  cancelled: number;
   pending: number;
 };
 
 export const getBatch = (id: string) => request<BatchStatus>(`/batches/${id}`);
 
-export const controlBatch = (id: string, action: "pause" | "resume" | "stop") =>
+export const controlBatch = (id: string, action: "pause" | "resume" | "stop" | "cancel") =>
   request<BatchStatus>(`/batches/${id}/control`, { method: "POST", body: JSON.stringify({ action }) });
+
+export const cancelAllJobs = () =>
+  request<{ cancelled_batches: number }>("/batches/cancel-all", { method: "POST" });
+
+export type BatchListItem = BatchStatus & {
+  name: string;
+  display_status: "RUNNING" | "PAUSED" | "COMPLETED" | "CANCELLED" | "FAILED";
+  created_at: string;
+};
+
+export const listBatches = () => request<{ items: BatchListItem[] }>("/batches");
+
+export const resendMessage = (messageId: string) =>
+  request<{ batch_id: string; total: number; delay: number }>(`/history/${messageId}/resend`, { method: "POST" });
+
+export const resendBatch = (batchId: string) =>
+  request<{ batch_id: string; total: number; delay: number }>(`/batches/${batchId}/resend`, { method: "POST" });
+
+export const nextBatchJobs = (id: string, n = 10) =>
+  request<{ jobs: Job[]; control_state: string; delay?: number }>(`/batches/${id}/next-batch?n=${n}`);
+
+export const reportResultsBulk = (
+  results: { message_id: string; status: "sent" | "failed"; error_message?: string; simulated?: boolean }[],
+) => request<{ applied: number }>("/jobs/results", { method: "POST", body: JSON.stringify({ results }) });
 
 export type Job = {
   message_id: string;
